@@ -1,0 +1,21 @@
+name: industrial-cv
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - pymupdf
+      - paddleocr
+      - paddlepaddle
+      - opencv-python
+      - Pillow
+      - jinja2
+      - fastapi
+      - uvicorn[standard]
+      - pydantic-settings
+      - SQLAlchemy
+      - PyMySQL
+      - redis
+      - celery
+      - python-multipart

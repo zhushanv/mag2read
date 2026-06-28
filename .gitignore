@@ -1,0 +1,56 @@
+# System files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets and config
+.env
+.env.*
+!.env.example
+
+# Backend generated files
+backend/storage/tasks/
+backend/storage/pages/
+backend/storage/ocr/
+backend/storage/outputs/
+backend/storage/uploads/
+backend/storage/documents/
+backend/storage/paddlex_cache/
+
+# Process backups and generated artifacts
+backend/过程备份/
+backend/process_backup/
+
+# OCR/debug outputs
+ocr_crops/
+layout_raw/
+layout/
+clean/
+output/
+debug/
+
+# Logs
+*.log
+logs/
+
+# Node frontend dependencies/build outputs
+node_modules/
+dist/
+build/
+.vite/
+
+# IDE
+.idea/
+.vscode/

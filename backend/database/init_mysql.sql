@@ -1,0 +1,127 @@
+-- Mag2Read MySQL initialization script
+-- Database: mag2read
+-- Usage:
+--   mysql -u root -p < backend/database/init_mysql.sql
+
+CREATE DATABASE IF NOT EXISTS mag2read
+  DEFAULT CHARACTER SET utf8mb4
+  DEFAULT COLLATE utf8mb4_unicode_ci;
+
+USE mag2read;
+
+CREATE TABLE IF NOT EXISTS users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'user',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id VARCHAR(64) NOT NULL UNIQUE,
+  user_id BIGINT NULL,
+  original_name VARCHAR(255) NOT NULL,
+  input_type VARCHAR(32) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  current_stage VARCHAR(64) NULL,
+  progress TINYINT NOT NULL DEFAULT 0,
+  storage_dir VARCHAR(500) NOT NULL,
+  page_count INT NULL,
+  output_format VARCHAR(128) NULL,
+  error_message TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at DATETIME NULL,
+  finished_at DATETIME NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_tasks_user_id (user_id),
+  INDEX idx_tasks_status (status),
+  INDEX idx_tasks_created_at (created_at),
+  CONSTRAINT fk_tasks_user_id
+    FOREIGN KEY (user_id) REFERENCES users(id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS task_files (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id VARCHAR(64) NOT NULL,
+  file_role VARCHAR(64) NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  file_path VARCHAR(500) NOT NULL,
+  mime_type VARCHAR(128) NULL,
+  file_size BIGINT NULL,
+  page_no INT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_task_files_task_id (task_id),
+  INDEX idx_task_files_role (task_id, file_role),
+  INDEX idx_task_files_page (task_id, page_no),
+  CONSTRAINT fk_task_files_task_id
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS task_pages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id VARCHAR(64) NOT NULL,
+  page_no INT NOT NULL,
+  image_path VARCHAR(500) NOT NULL,
+  width INT NULL,
+  height INT NULL,
+  quality_status VARCHAR(32) NULL,
+  page_type VARCHAR(64) NULL,
+  layout_type VARCHAR(64) NULL,
+  ocr_status VARCHAR(32) NULL,
+  avg_confidence DECIMAL(5,4) NULL,
+  need_review BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_task_pages_task_page (task_id, page_no),
+  INDEX idx_task_pages_review (task_id, need_review),
+  INDEX idx_task_pages_type (task_id, page_type),
+  CONSTRAINT fk_task_pages_task_id
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS task_steps (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id VARCHAR(64) NOT NULL,
+  stage VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  progress TINYINT NOT NULL DEFAULT 0,
+  started_at DATETIME NULL,
+  finished_at DATETIME NULL,
+  duration_ms INT NULL,
+  summary_json JSON NULL,
+  error_message TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_task_steps_task_stage (task_id, stage),
+  INDEX idx_task_steps_status (task_id, status),
+  CONSTRAINT fk_task_steps_task_id
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS export_records (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id VARCHAR(64) NOT NULL,
+  format VARCHAR(32) NOT NULL,
+  file_path VARCHAR(500) NULL,
+  file_size BIGINT NULL,
+  status VARCHAR(32) NOT NULL,
+  error_message TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_export_records_task_format (task_id, format),
+  INDEX idx_export_records_status (task_id, status),
+  CONSTRAINT fk_export_records_task_id
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO users (username, password_hash, role)
+VALUES ('admin', NULL, 'admin')
+ON DUPLICATE KEY UPDATE
+  role = VALUES(role),
+  updated_at = CURRENT_TIMESTAMP;
