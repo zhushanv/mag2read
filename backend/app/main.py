@@ -3,7 +3,10 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.api.exports import router as exports_router
 from backend.app.api.health import router as health_router
+from backend.app.api.task_events import router as task_events_router
+from backend.app.api.tasks import router as tasks_router
 from backend.app.core.config import get_settings
 
 
@@ -24,6 +27,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(tasks_router)
+    app.include_router(exports_router)
+    app.include_router(task_events_router)
 
     @app.get("/")
     def root() -> dict[str, str]:

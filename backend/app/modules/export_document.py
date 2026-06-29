@@ -417,12 +417,69 @@ def export_html(document: dict[str, Any], output_path: Path) -> str:
 # ---------------------------------------------------------------
 # 统一导出入口
 # ---------------------------------------------------------------
+def export_markdown(document: dict[str, Any], output_path: Path) -> str:
+    lines: list[str] = []
+
+    title = strip_title_newlines(document.get("title", "Untitled"))
+    lines.append(f"# {title}")
+    lines.append("")
+
+    author = document.get("author", "")
+    if author:
+        lines.append(f"> 作者：{author}")
+        lines.append("")
+
+    chapters_data = document.get("chapters", [])
+    if chapters_data:
+        for ch in chapters_data:
+            ch_title = strip_title_newlines(ch.get("title", ""))
+            if ch_title:
+                lines.append(f"## {ch_title}")
+                lines.append("")
+            for block in ch.get("blocks", []):
+                _add_block_to_md(lines, block)
+    else:
+        for page in document.get("pages", []):
+            lines.append(f"---")
+            lines.append(f"<small>第 {page['page_no']} 页</small>")
+            lines.append("")
+            for block in page.get("blocks", []):
+                _add_block_to_md(lines, block)
+
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(output_path)
+
+
+def _add_block_to_md(lines: list[str], block: dict[str, Any]) -> None:
+    text = block["text"]
+    block_type = block.get("type", "paragraph")
+
+    if block_type == "heading":
+        level = min(int(block.get("level", 2)), 6)
+        lines.append(f"{'#' * level} {text}")
+    elif block_type == "caption":
+        lines.append(f"*{text}*")
+    elif block_type == "sidebar":
+        lines.append(f"> **补充：** {text}")
+    elif block_type == "note":
+        lines.append(f"> **注：** {text}")
+    else:
+        if block.get("_paragraph_break"):
+            lines.append("")
+        lines.append(text)
+    lines.append("")
+
+
+# ---------------------------------------------------------------
+# 统一导出入口
+# ---------------------------------------------------------------
 
 FORMAT_EXPORTERS = {
     "epub": ("EPUB 电子书", export_epub, ".epub"),
     "docx": ("Word 文档", export_docx, ".docx"),
     "txt": ("纯文本", export_txt, ".txt"),
     "html": ("HTML 网页", export_html, ".html"),
+    "markdown": ("Markdown", export_markdown, ".md"),
 }
 
 

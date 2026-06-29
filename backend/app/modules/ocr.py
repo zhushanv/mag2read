@@ -20,6 +20,7 @@ DEFAULT_PADDLEX_CACHE = PROJECT_ROOT / "backend" / "storage" / "paddlex_cache"
 
 OCR_ROLES = {"title", "subtitle", "body", "caption", "sidebar", "note"}
 SKIP_ROLES = {"figure", "table", "formula", "header", "footer", "page_number", "adornment"}
+SLOW_BLOCK_SECONDS = 2.0
 
 
 def project_relative(path: Path) -> str:
@@ -123,10 +124,12 @@ def normalize_box(box: Any, offset_x: int, offset_y: int) -> dict[str, float]:
     }
 
 
-def run_ocr_on_crop(ocr: Any, crop_path: Path, offset_x: int, offset_y: int) -> tuple[list[dict[str, Any]], str, float | None]:
+def run_ocr_on_crop(ocr: Any, crop_path: Path, offset_x: int, offset_y: int) -> tuple[list[dict[str, Any]], str, float | None, float]:
+    predict_started = time.perf_counter()
     results = ocr.predict(str(crop_path))
+    predict_seconds = round4(time.perf_counter() - predict_started)
     if not results:
-        return [], "", None
+        return [], "", None, predict_seconds
 
     result = results[0]
     texts = result_list(result, "rec_texts")
@@ -153,7 +156,7 @@ def run_ocr_on_crop(ocr: Any, crop_path: Path, offset_x: int, offset_y: int) -> 
     avg_confidence = None
     if lines:
         avg_confidence = round4(sum(line["confidence"] for line in lines) / len(lines))
-    return lines, merged_text, avg_confidence
+    return lines, merged_text, avg_confidence, predict_seconds
 
 
 def collect_layout_pages(task_dir: Path) -> list[Path]:
@@ -177,6 +180,23 @@ def init_ocr(cache_dir: Path, use_textline_orientation: bool) -> Any:
     )
 
 
+def init_ocr_with_timing(cache_dir: Path, use_textline_orientation: bool) -> tuple[Any, dict[str, Any]]:
+    started = time.perf_counter()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    before_models = sorted(str(path.relative_to(cache_dir)) for path in cache_dir.glob("official_models/*"))
+    ocr = init_ocr(cache_dir, use_textline_orientation=use_textline_orientation)
+    after_models = sorted(str(path.relative_to(cache_dir)) for path in cache_dir.glob("official_models/*"))
+    timing = {
+        "ocr_model_init_seconds": round4(time.perf_counter() - started),
+        "paddlex_cache_dir": project_relative(cache_dir),
+        "models_before_count": len(before_models),
+        "models_after_count": len(after_models),
+        "models_added": [model for model in after_models if model not in set(before_models)],
+        "use_textline_orientation": use_textline_orientation,
+    }
+    return ocr, timing
+
+
 def ocr_page(
     page_layout: dict[str, Any],
     task_dir: Path,
@@ -195,6 +215,7 @@ def ocr_page(
 
     blocks_out: list[dict[str, Any]] = []
     skipped_blocks: list[dict[str, Any]] = []
+    block_timings: list[dict[str, Any]] = []
     started = time.perf_counter()
 
     with Image.open(image_path) as image:
@@ -214,15 +235,42 @@ def ocr_page(
                 )
                 continue
 
+            block_started = time.perf_counter()
+            crop_started = time.perf_counter()
             crop_box = crop_box_from_bbox(block["bbox"], image_width, image_height, padding)
             crop = image.crop(crop_box)
+            crop_seconds = round4(time.perf_counter() - crop_started)
+
+            save_started = time.perf_counter()
             crop_path = crop_dir / f"page_{page_no:03d}_{block['block_id']}.png"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             crop.save(crop_path, format="PNG")
+            crop_save_seconds = round4(time.perf_counter() - save_started)
 
-            lines, text, confidence = run_ocr_on_crop(ocr, crop_path, crop_box[0], crop_box[1])
+            lines, text, confidence, predict_seconds = run_ocr_on_crop(ocr, crop_path, crop_box[0], crop_box[1])
+
+            cleanup_started = time.perf_counter()
             if not save_crops:
                 crop_path.unlink(missing_ok=True)
+            cleanup_seconds = round4(time.perf_counter() - cleanup_started)
+            block_seconds = round4(time.perf_counter() - block_started)
+
+            timing = {
+                "block_id": block["block_id"],
+                "role": block["role"],
+                "order": block.get("order"),
+                "line_count": len(lines),
+                "text_length": len(text),
+                "crop_width": crop_box[2] - crop_box[0],
+                "crop_height": crop_box[3] - crop_box[1],
+                "crop_seconds": crop_seconds,
+                "crop_save_seconds": crop_save_seconds,
+                "predict_seconds": predict_seconds,
+                "cleanup_seconds": cleanup_seconds,
+                "total_seconds": block_seconds,
+                "is_slow": block_seconds >= SLOW_BLOCK_SECONDS,
+            }
+            block_timings.append(timing)
 
             blocks_out.append(
                 {
@@ -240,30 +288,51 @@ def ocr_page(
                     "line_count": len(lines),
                     "lines": lines,
                     "crop_path": project_relative(crop_path) if save_crops else None,
+                    "timing": timing,
                 }
             )
 
     recognized_blocks = [block for block in blocks_out if block["text"]]
     confidences = [block["ocr_confidence"] for block in recognized_blocks if block["ocr_confidence"] is not None]
     page_confidence = round4(sum(confidences) / len(confidences)) if confidences else None
+    total_predict_seconds = round4(sum(item["predict_seconds"] for item in block_timings))
+    total_block_seconds = round4(sum(item["total_seconds"] for item in block_timings))
+    slow_blocks = sorted(
+        [item for item in block_timings if item["is_slow"]],
+        key=lambda item: item["total_seconds"],
+        reverse=True,
+    )
+    page_ocr_seconds = round4(time.perf_counter() - started)
     return {
         "task_id": page_layout["task_id"],
         "page_no": page_no,
         "image_path": page_layout["image_path"],
         "page_type": page_layout.get("page_type"),
         "layout_type": page_layout.get("layout_type"),
-        "ocr_seconds": round4(time.perf_counter() - started),
+        "ocr_seconds": page_ocr_seconds,
         "ocr_block_count": len(blocks_out),
         "recognized_block_count": len(recognized_blocks),
         "skipped_block_count": len(skipped_blocks),
         "line_count": sum(block["line_count"] for block in blocks_out),
         "avg_confidence": page_confidence,
+        "timing": {
+            "page_ocr_seconds": page_ocr_seconds,
+            "total_block_seconds": total_block_seconds,
+            "total_predict_seconds": total_predict_seconds,
+            "avg_block_seconds": round4(total_block_seconds / len(block_timings)) if block_timings else 0.0,
+            "avg_predict_seconds": round4(total_predict_seconds / len(block_timings)) if block_timings else 0.0,
+            "max_block_seconds": max((item["total_seconds"] for item in block_timings), default=0.0),
+            "max_predict_seconds": max((item["predict_seconds"] for item in block_timings), default=0.0),
+            "slow_block_threshold_seconds": SLOW_BLOCK_SECONDS,
+            "slow_block_count": len(slow_blocks),
+            "slow_blocks": slow_blocks[:10],
+        },
         "blocks": blocks_out,
         "skipped_blocks": skipped_blocks,
     }
 
 
-def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at: datetime) -> dict[str, Any]:
+def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at: datetime, init_timing: dict[str, Any]) -> dict[str, Any]:
     total_blocks = sum(page["ocr_block_count"] for page in pages)
     recognized_blocks = sum(page["recognized_block_count"] for page in pages)
     skipped_blocks = sum(page["skipped_block_count"] for page in pages)
@@ -273,8 +342,17 @@ def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at:
     low_confidence_blocks = 0
     empty_blocks = 0
     role_counts: dict[str, int] = {}
+    page_timings = [page.get("timing", {}) for page in pages]
+    total_page_ocr_seconds = round4(sum(safe_float(item.get("page_ocr_seconds")) for item in page_timings))
+    total_predict_seconds = round4(sum(safe_float(item.get("total_predict_seconds")) for item in page_timings))
+    total_block_seconds = round4(sum(safe_float(item.get("total_block_seconds")) for item in page_timings))
+    slow_blocks_all: list[dict[str, Any]] = []
 
     for page in pages:
+        for slow_block in page.get("timing", {}).get("slow_blocks", []):
+            item = dict(slow_block)
+            item["page_no"] = page["page_no"]
+            slow_blocks_all.append(item)
         for block in page["blocks"]:
             role = str(block["role"])
             role_counts[role] = role_counts.get(role, 0) + 1
@@ -282,6 +360,9 @@ def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at:
                 empty_blocks += 1
             if block["ocr_confidence"] is not None and block["ocr_confidence"] < 0.80:
                 low_confidence_blocks += 1
+
+    slow_blocks_all.sort(key=lambda item: item["total_seconds"], reverse=True)
+    total_ocr_seconds = round4(safe_float(init_timing.get("ocr_model_init_seconds")) + total_page_ocr_seconds)
 
     return {
         "task_id": task_dir.name,
@@ -298,6 +379,22 @@ def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at:
         "avg_confidence": avg_confidence,
         "low_confidence_block_count": low_confidence_blocks,
         "role_counts": role_counts,
+        "timing": {
+            **init_timing,
+            "total_ocr_seconds": total_ocr_seconds,
+            "total_page_ocr_seconds": total_page_ocr_seconds,
+            "total_block_seconds": total_block_seconds,
+            "total_predict_seconds": total_predict_seconds,
+            "avg_page_ocr_seconds": round4(total_page_ocr_seconds / len(pages)) if pages else 0.0,
+            "avg_block_seconds": round4(total_block_seconds / total_blocks) if total_blocks else 0.0,
+            "avg_predict_seconds": round4(total_predict_seconds / total_blocks) if total_blocks else 0.0,
+            "max_page_ocr_seconds": max((safe_float(item.get("page_ocr_seconds")) for item in page_timings), default=0.0),
+            "max_block_seconds": max((safe_float(item.get("max_block_seconds")) for item in page_timings), default=0.0),
+            "max_predict_seconds": max((safe_float(item.get("max_predict_seconds")) for item in page_timings), default=0.0),
+            "slow_block_threshold_seconds": SLOW_BLOCK_SECONDS,
+            "slow_block_count": len(slow_blocks_all),
+            "slow_blocks": slow_blocks_all[:20],
+        },
         "pages": [
             {
                 "page_no": page["page_no"],
@@ -307,6 +404,7 @@ def summarize_ocr_pages(pages: list[dict[str, Any]], task_dir: Path, started_at:
                 "skipped_block_count": page["skipped_block_count"],
                 "line_count": page["line_count"],
                 "avg_confidence": page["avg_confidence"],
+                "timing": page.get("timing", {}),
             }
             for page in pages
         ],
@@ -322,12 +420,15 @@ def run_task_ocr(
     use_textline_orientation: bool,
 ) -> dict[str, Any]:
     started_at = datetime.now()
-    ocr = init_ocr(cache_dir, use_textline_orientation=use_textline_orientation)
+    print(f"[ocr] initializing PaddleOCR, cache_dir={cache_dir}")
+    ocr, init_timing = init_ocr_with_timing(cache_dir, use_textline_orientation=use_textline_orientation)
+    print(f"[ocr] PaddleOCR initialized in {init_timing['ocr_model_init_seconds']}s")
     crop_dir = task_dir / "ocr_crops"
     page_outputs: list[dict[str, Any]] = []
 
     for layout_path in collect_layout_pages(task_dir):
         page_layout = load_json(layout_path)
+        print(f"[ocr] page {page_layout.get('page_no')} started: {layout_path.name}")
         page_output = ocr_page(
             page_layout=page_layout,
             task_dir=task_dir,
@@ -336,6 +437,17 @@ def run_task_ocr(
             padding=padding,
             include_unknown=include_unknown,
             save_crops=save_crops,
+        )
+        print(
+            "[ocr] page {page_no} finished: blocks={blocks}, recognized={recognized}, "
+            "page_seconds={seconds}, predict_seconds={predict}, slow_blocks={slow}".format(
+                page_no=page_output["page_no"],
+                blocks=page_output["ocr_block_count"],
+                recognized=page_output["recognized_block_count"],
+                seconds=page_output["timing"]["page_ocr_seconds"],
+                predict=page_output["timing"]["total_predict_seconds"],
+                slow=page_output["timing"]["slow_block_count"],
+            )
         )
         page_outputs.append(page_output)
         write_json(task_dir / "ocr" / f"page_{int(page_output['page_no']):03d}.json", page_output)
@@ -347,8 +459,17 @@ def run_task_ocr(
         except OSError:
             pass
 
-    summary = summarize_ocr_pages(page_outputs, task_dir, started_at)
+    summary = summarize_ocr_pages(page_outputs, task_dir, started_at, init_timing=init_timing)
     write_json(task_dir / "ocr" / "summary.json", summary)
+    print(
+        "[ocr] task finished: total={total}s, init={init}s, page_total={pages}s, predict_total={predict}s, slow_blocks={slow}".format(
+            total=summary["timing"]["total_ocr_seconds"],
+            init=summary["timing"]["ocr_model_init_seconds"],
+            pages=summary["timing"]["total_page_ocr_seconds"],
+            predict=summary["timing"]["total_predict_seconds"],
+            slow=summary["timing"]["slow_block_count"],
+        )
+    )
     return summary
 
 

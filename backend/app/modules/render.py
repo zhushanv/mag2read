@@ -92,6 +92,19 @@ def prepare_task_dir(task_dir: Path, overwrite: bool) -> Path:
     return pages_dir
 
 
+def prepare_pages_dir(task_dir: Path, overwrite: bool) -> Path:
+    pages_dir = task_dir / "pages"
+    if pages_dir.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"Pages directory already exists: {pages_dir}. "
+                "Use overwrite=True to rebuild rendered pages."
+            )
+        shutil.rmtree(pages_dir)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    return pages_dir
+
+
 def project_relative(path: Path) -> str:
     return str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
 
@@ -235,6 +248,7 @@ def render_pdf_pages(
     page_range: str | None,
     overwrite: bool,
     copy_input: bool,
+    reset_task_dir: bool = True,
 ) -> dict:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF file does not exist: {pdf_path}")
@@ -244,7 +258,7 @@ def render_pdf_pages(
         raise ValueError("DPI must be a positive integer.")
 
     fitz = import_fitz()
-    pages_dir = prepare_task_dir(task_dir, overwrite=overwrite)
+    pages_dir = prepare_task_dir(task_dir, overwrite=overwrite) if reset_task_dir else prepare_pages_dir(task_dir, overwrite=True)
     started_at = datetime.now()
     rendered_pages: list[RenderedPage] = []
 
@@ -307,9 +321,10 @@ def render_image_pages(
     task_dir: Path,
     overwrite: bool,
     copy_input: bool,
+    reset_task_dir: bool = True,
 ) -> dict:
     image_paths = collect_image_inputs(image_input_path)
-    pages_dir = prepare_task_dir(task_dir, overwrite=overwrite)
+    pages_dir = prepare_task_dir(task_dir, overwrite=overwrite) if reset_task_dir else prepare_pages_dir(task_dir, overwrite=True)
     started_at = datetime.now()
     rendered_pages: list[RenderedPage] = []
 
@@ -372,6 +387,7 @@ def render_input_pages(
     page_range: str | None,
     overwrite: bool,
     copy_input: bool,
+    reset_task_dir: bool = True,
 ) -> dict:
     if input_path.is_file() and input_path.suffix.lower() == ".pdf":
         return render_pdf_pages(
@@ -381,6 +397,7 @@ def render_input_pages(
             page_range=page_range,
             overwrite=overwrite,
             copy_input=copy_input,
+            reset_task_dir=reset_task_dir,
         )
 
     if page_range:
@@ -391,6 +408,7 @@ def render_input_pages(
         task_dir=task_dir,
         overwrite=overwrite,
         copy_input=copy_input,
+        reset_task_dir=reset_task_dir,
     )
 
 

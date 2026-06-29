@@ -28,6 +28,10 @@ class Settings(BaseSettings):
 
     storage_root: str = str(PROJECT_ROOT / "backend" / "storage" / "tasks")
     paddlex_cache_root: str = str(PROJECT_ROOT / "backend" / "storage" / "paddlex_cache")
+    max_upload_size_mb: int = 100
+    baidu_ocr_api_key: str | None = None
+    baidu_ocr_secret_key: str | None = None
+    baidu_ocr_access_token: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
