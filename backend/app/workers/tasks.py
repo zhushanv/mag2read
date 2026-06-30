@@ -13,6 +13,7 @@ from backend.app.modules.document_build import build_document, write_outputs
 from backend.app.modules.export_document import run_export
 from backend.app.modules.layout_detect import analyze_task_layout
 from backend.app.modules.layout_refine import refine_task_layout
+from backend.app.modules.media_builder import build_media_assets
 from backend.app.modules.ocr import run_task_ocr
 from backend.app.modules.render import render_input_pages
 from backend.app.modules.text_cleaning import run_cleaning
@@ -68,6 +69,8 @@ def process_uploaded_task(task_id: str) -> dict[str, Any]:
             results.update(run_cloud_recognition_stages(db, task_id, task_dir, input_path, settings, input_file=project_relative(input_path)))
         else:
             results.update(run_local_recognition_stages(db, task_id, task_dir, settings))
+        results["media"] = build_media_assets(task_dir)
+        record_media_files(db, task_id, task_dir)
 
         current_stage = TaskStage.TEXT_CLEANING
         results["text_cleaning"] = run_pipeline_stage(
@@ -267,7 +270,7 @@ def write_task_metadata(task_dir: Path, updates: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
+# Processing mode: local, cloud, or auto
 def resolve_processing_mode(requested_mode: str, input_type: str) -> str:
     if requested_mode in {"local", "cloud"}:
         return requested_mode
@@ -434,6 +437,38 @@ def record_markdown_file(db, task_id: str, task_dir: Path) -> None:
                 file_path=str(path),
                 mime_type="text/markdown",
                 file_size=path.stat().st_size,
+            ),
+        )
+
+
+def record_media_files(db, task_id: str, task_dir: Path) -> None:
+    media_dir = task_dir / "media"
+    if not media_dir.exists():
+        return
+    for path in sorted(media_dir.glob("*.png")):
+        task_service.add_task_file(
+            db,
+            task_id,
+            TaskFileCreate(
+                file_role="media_image",
+                file_name=path.name,
+                file_path=str(path),
+                mime_type="image/png",
+                file_size=path.stat().st_size,
+                page_no=parse_page_no(path),
+            ),
+        )
+    summary_path = media_dir / "summary.json"
+    if summary_path.exists():
+        task_service.add_task_file(
+            db,
+            task_id,
+            TaskFileCreate(
+                file_role="media_summary",
+                file_name=summary_path.name,
+                file_path=str(summary_path),
+                mime_type="application/json",
+                file_size=summary_path.stat().st_size,
             ),
         )
 

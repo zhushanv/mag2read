@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from backend.app.core.auth_dependencies import get_current_user
@@ -26,6 +26,8 @@ from backend.app.schemas.task import (
 )
 from backend.app.services import task_service
 from backend.app.services.enums import InputType
+from io import BytesIO
+from PIL import Image
 
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -287,6 +289,66 @@ def get_task_page_ocr(task_id: str, page_no: int, current_user: User = Depends(g
 def get_clean_document(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = ensure_user_task(db, task_id, current_user)
     return read_task_json(task, "clean", "document.json")
+
+
+@router.get("/{task_id}/pages/{page_no}/crop")
+def get_task_page_crop(
+    task_id: str,
+    page_no: int,
+    x1: float = Query(..., description="Left coordinate"),
+    y1: float = Query(..., description="Top coordinate"),
+    x2: float = Query(..., description="Right coordinate"),
+    y2: float = Query(..., description="Bottom coordinate"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the cropped image region from a task page.
+
+    Coordinates are in the original page image space.
+    """
+    task = ensure_user_task(db, task_id, current_user)
+    page = task_service.get_task_page(db, task_id, page_no)
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    # Resolve page image path
+    path = Path(page.image_path).resolve() if page.image_path else None
+    if path is None or not path.exists():
+        path = task_file_path(task, "pages", f"page_{page_no:03d}.png")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Page image not found")
+
+    try:
+        img = Image.open(path)
+        # Clamp coordinates to image bounds
+        img_w, img_h = img.size
+        left = max(0, min(x1, x2, img_w - 1))
+        upper = max(0, min(y1, y2, img_h - 1))
+        right = min(max(x1, x2, left + 1), img_w)
+        lower = min(max(y1, y2, upper + 1), img_h)
+        crop = img.crop((left, upper, right, lower))
+        buf = BytesIO()
+        crop.save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to crop image: {exc}")
+
+
+@router.get("/{task_id}/media/{filename}")
+def get_task_media(
+    task_id: str,
+    filename: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = ensure_user_task(db, task_id, current_user)
+    safe_name = Path(filename).name
+    if safe_name != filename or not safe_name.lower().endswith(".png"):
+        raise HTTPException(status_code=400, detail="Invalid media filename")
+    path = task_file_path(task, "media", safe_name)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Media file not found")
+    return FileResponse(path, media_type="image/png", filename=safe_name)
 
 
 @router.get("/{task_id}/exports", response_model=list[ExportRecordRead])

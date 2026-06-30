@@ -28,6 +28,7 @@ HEADER_FOOTER_TOP_RATIO = 0.12
 HEADER_FOOTER_BOTTOM_RATIO = 0.10
 REPEATED_PAGE_THRESHOLD = 3
 PARAGRAPH_GAP_EM = 1.2
+GRAPHICAL_ROLES = {"figure", "image", "table", "formula"}
 
 
 @dataclass
@@ -171,6 +172,36 @@ def read_all_pages(task_dir: Path) -> tuple[list[PageData], Path]:
         blocks = list(ocr_data.get("blocks", []))
         for blk in blocks:
             blk["page_no"] = page_no
+        # Merge non-text layout blocks (figure/table/image) that were skipped by OCR
+        skipped = ocr_data.get("skipped_blocks", [])
+        layout_index = {b.get("block_id"): b for b in layout_meta.get("blocks", [])}
+        for sk in skipped:
+            role = sk.get("role", "")
+            if role in GRAPHICAL_ROLES:
+                layout_block = layout_index.get(sk.get("block_id"), {})
+                merged = {
+                    "block_id": sk.get("block_id"),
+                    "page_no": page_no,
+                    "role": role,
+                    "text": "",
+                    "bbox": layout_block.get("bbox"),
+                    "order": layout_block.get("order"),
+                    "reading_group": sk.get("reading_group"),
+                    "is_graphical": True,
+                }
+                if merged["bbox"] or merged["order"] is not None:
+                    blocks.append(merged)
+
+
+        # Also mark existing graphical blocks (e.g. from Baidu cloud OCR)
+        # so they survive the pipeline regardless of how they arrived in blocks.
+        for blk in blocks:
+            if blk.get("role") in GRAPHICAL_ROLES:
+                blk["is_graphical"] = True
+
+        # Sort blocks by reading order so graphical blocks appear in correct position
+        blocks.sort(key=lambda b: (b.get("order") is None, b.get("order") or 0))
+
 
         pages.append(PageData(
             page_no=page_no,
@@ -200,8 +231,12 @@ def run_fingerprint_filter(pages: list[PageData], stats: CleaningStats) -> None:
         for block in page.blocks:
             text = str(block.get("text", "")).strip()
             if not text:
-                block["is_noise"] = True
-                block["noise_reason"] = "empty_text"
+                if block.get("role") in GRAPHICAL_ROLES:
+                    block["is_noise"] = False
+                    block["noise_reason"] = None
+                else:
+                    block["is_noise"] = True
+                    block["noise_reason"] = "empty_text"
                 continue
 
             edges = edges_of_block(block, page.height, page.width)
@@ -411,10 +446,13 @@ def run_paragraph_builder(pages: list[PageData], stats: CleaningStats) -> None:
             text = normalize_text(text)
 
             if not text:
-                block["is_noise"] = True
-                block["noise_reason"] = "empty_after_cleaning"
-                stats.blank_blocks_removed += 1
-                continue
+                if block.get("is_graphical"):
+                    block["text"] = ""
+                else:
+                    block["is_noise"] = True
+                    block["noise_reason"] = "empty_after_cleaning"
+                    stats.blank_blocks_removed += 1
+                    continue
 
             block["text"] = text
 
@@ -442,6 +480,7 @@ def build_clean_document(
     pages: list[PageData], task_dir: Path, stats: CleaningStats,
 ) -> dict[str, Any]:
     started_at = datetime.now()
+    media_index = load_media_index(task_dir)
 
     clean_pages: list[dict[str, Any]] = []
     sequence = 1
@@ -453,7 +492,29 @@ def build_clean_document(
                 continue
             text = str(block.get("text", "")).strip()
             if not text:
+                # Keep figure/image/table blocks even when text is empty,
+                # so the frontend can show a cropped preview.
+                role = str(block.get("role", "body"))
+                if role in GRAPHICAL_ROLES:
+                    block_type, _ = _classify_block_type(role)
+                    out = {
+                        "id": f"c{sequence:05d}",
+                        "type": block_type,
+                        "text": "",
+                        "source_pages": [page.page_no],
+                        "source_block_ids": [block.get("block_id")],
+                        "role": role,
+                        "reading_group": block.get("reading_group", "main"),
+                        "is_graphical": True,
+                        "bbox": block.get("bbox"),
+                        "order": block.get("order"),
+                    }
+                    attach_media_fields(out, media_index, page.page_no, block.get("block_id"))
+                    page_blocks.append(out)
+                    sequence += 1
+                    stats.output_blocks += 1
                 continue
+
 
             role = str(block.get("role", "body"))
             block_type, level = _classify_block_type(role)
@@ -473,6 +534,9 @@ def build_clean_document(
                 out["level"] = level
             if block.get("_paragraph_break"):
                 out["_paragraph_break"] = True
+            if role in GRAPHICAL_ROLES or block.get("is_graphical"):
+                out["is_graphical"] = True
+                attach_media_fields(out, media_index, page.page_no, block.get("block_id"))
             page_blocks.append(out)
             sequence += 1
             stats.output_blocks += 1
@@ -518,6 +582,35 @@ def build_clean_document(
     }
 
 
+def load_media_index(task_dir: Path) -> dict[tuple[int, str], dict[str, Any]]:
+    summary_path = task_dir / "media" / "summary.json"
+    if not summary_path.exists():
+        return {}
+    try:
+        summary = load_json(summary_path)
+    except json.JSONDecodeError:
+        return {}
+    index: dict[tuple[int, str], dict[str, Any]] = {}
+    for item in summary.get("items", []):
+        block_id = item.get("block_id")
+        page_no = item.get("page_no")
+        if block_id is None or page_no is None:
+            continue
+        index[(int(page_no), str(block_id))] = item
+    return index
+
+
+def attach_media_fields(out: dict[str, Any], media_index: dict[tuple[int, str], dict[str, Any]], page_no: int, block_id: Any) -> None:
+    if block_id is None:
+        return
+    item = media_index.get((page_no, str(block_id)))
+    if not item:
+        return
+    out["media_path"] = item.get("media_path")
+    out["media_width"] = item.get("width")
+    out["media_height"] = item.get("height")
+
+
 def _classify_block_type(role: str) -> tuple[str, int | None]:
     if role == "title":
         return "heading", 1
@@ -527,6 +620,13 @@ def _classify_block_type(role: str) -> tuple[str, int | None]:
         return "caption", None
     if role in ("sidebar", "note"):
         return role, None
+    if role in ("figure", "image"):
+        return "figure", None
+    if role == "table":
+        return "table", None
+    if role == "formula":
+        return "formula", None
+
     return "paragraph", None
 
 
