@@ -171,6 +171,13 @@ type CleanBlock = {
   role?: string;
   text?: string;
   page_no?: number;
+  is_graphical?: boolean;
+  bbox?: BBox;
+  media_path?: string | null;
+  media_width?: number | null;
+  media_height?: number | null;
+  source_pages?: number[];
+  ocr_confidence?: number | null;
 };
 
 type CleanPage = {
@@ -1296,6 +1303,7 @@ function PreviewPane({ bundle }: { bundle: TaskBundle }) {
 function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => void }) {
   const [cleanDocument, setCleanDocument] = useState<CleanDocument | null>(null);
   const [cleanStatus, setCleanStatus] = useState<"loading" | "ready" | "waiting">("loading");
+  const [showMedia, setShowMedia] = useState(false);
 
   useEffect(() => {
     setCleanStatus("loading");
@@ -1310,13 +1318,38 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
       });
   }, [bundle.task.task_id, bundle.task.progress]);
 
-  const cleanBlocks = cleanBlocksFromDocument(cleanDocument).filter((block) => block.text?.trim());
-  const previewBlocks = cleanBlocks.slice(0, 16);
+  const cleanBlocks = cleanBlocksFromDocument(cleanDocument).filter((block) => {
+    if (blockHasMedia(block)) return showMedia;
+    return Boolean(block.text?.trim());
+  });
+  const previewBlocks = cleanBlocks.slice(0, 40);
+
+  function blockHasMedia(block: CleanBlock): boolean {
+    return Boolean(block.is_graphical || ["figure", "image", "table", "formula"].includes(String(block.role ?? block.type ?? "")));
+  }
+
+  function mediaUrl(block: CleanBlock): string | null {
+    if (!block.media_path) return null;
+    const filename = block.media_path.split("/").filter(Boolean).pop();
+    if (!filename) return null;
+    return `${API_BASE}/api/tasks/${bundle.task.task_id}/media/${encodeURIComponent(filename)}`;
+  }
 
   return (
     <section className="pane text-pane">
       <div className="pane-title">
         <h2>阅读稿预览</h2>
+        <label className="media-toggle" title="显示图片和表格">
+          <input
+            type="checkbox"
+            checked={showMedia}
+            onChange={(e) => setShowMedia(e.target.checked)}
+          />
+          <span className="media-toggle-track">
+            <span className="media-toggle-thumb" />
+          </span>
+          <span className="media-toggle-label">图片</span>
+        </label>
         <span className="live-dot">{cleanStatus === "ready" ? "已生成" : "实时更新"}</span>
       </div>
       <article className="reading-page">
@@ -1324,11 +1357,41 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
         {cleanStatus !== "ready" && <WaitingReadingPreview task={bundle.task} />}
         {cleanStatus === "ready" && previewBlocks.length === 0 && <p>清洗文档已生成，但正文块为空，请查看 OCR 或清洗报告。</p>}
         {cleanStatus === "ready" &&
-          previewBlocks.map((block, index) => (
-            <p className={block.type === "heading" || block.role === "title" ? "clean-heading" : ""} key={`${block.page_no ?? "p"}-${index}`}>
-              {block.text}
-            </p>
-          ))}
+          previewBlocks.map((block, index) => {
+            if (blockHasMedia(block) && showMedia) {
+              const src = mediaUrl(block);
+              return (
+                <div className="media-block" key={`media-${index}`}>
+                  {src ? (
+                    <div className="media-block-image">
+                      <img
+                        src={src}
+                        alt={block.text || (block.role === "table" ? "表格" : "图片")}
+                        loading="lazy"
+                      />
+                    </div>
+                  ) : (
+                    <div className="media-missing">媒体素材未生成</div>
+                  )}
+                  {block.text && (
+                    <p className={block.type === "caption" || block.role === "caption" ? "media-caption" : ""}>
+                      {block.text}
+                    </p>
+                  )}
+                  {block.role === "table" && !block.is_graphical && (
+                    <div className="media-table-marker">
+                      <span>表格</span>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <p className={block.type === "heading" || block.role === "title" ? "clean-heading" : block.type === "formula" || block.role === "formula" ? "clean-formula" : ""} key={`${block.page_no ?? "p"}-${index}`}>
+                {block.text}
+              </p>
+            );
+          })}
       </article>
       <button className="floating-ai" aria-label="打开 AI 导读" onClick={onOpenAi}>
         <AiSparkleIcon size={24} />
@@ -1336,7 +1399,6 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
     </section>
   );
 }
-
 function WaitingReadingPreview({ task }: { task: Task }) {
   const currentStage = task.current_stage ? STAGE_LABELS[task.current_stage] ?? task.current_stage : "等待调度";
 
