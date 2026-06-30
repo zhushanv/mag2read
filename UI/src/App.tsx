@@ -3,7 +3,10 @@ import {
   FileCode2,
   FileText,
   MessageSquareText,
+  Pencil,
   RefreshCw,
+  RotateCcw,
+  Save,
   X
 } from "lucide-react";
 import {
@@ -167,6 +170,8 @@ type ExplainPageData = {
 };
 
 type CleanBlock = {
+  id?: string;
+  block_id?: string;
   type?: string;
   role?: string;
   text?: string;
@@ -177,6 +182,7 @@ type CleanBlock = {
   media_width?: number | null;
   media_height?: number | null;
   source_pages?: number[];
+  source_block_ids?: string[];
   ocr_confidence?: number | null;
 };
 
@@ -190,6 +196,16 @@ type CleanDocument = {
   pages?: CleanPage[];
   blocks?: CleanBlock[];
   stats?: Record<string, unknown>;
+};
+
+type EditableDocumentResponse = {
+  task_id: string;
+  source: "clean" | "edited";
+  has_edited: boolean;
+  document_path: string;
+  base_document_path: string;
+  document: CleanDocument;
+  manual_edit?: Record<string, unknown> | null;
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -331,6 +347,38 @@ function cleanBlocksFromDocument(document: CleanDocument | null): CleanBlock[] {
       page_no: block.page_no ?? page.page_no
     }))
   );
+}
+
+function cleanBlockKey(block: CleanBlock, index: number): string {
+  const sourceKey = Array.isArray(block.source_block_ids) ? block.source_block_ids.join("|") : "";
+  return String(block.id || block.block_id || sourceKey || `${block.page_no ?? "p"}-${index}`);
+}
+
+function cloneCleanDocument(document: CleanDocument): CleanDocument {
+  return JSON.parse(JSON.stringify(document)) as CleanDocument;
+}
+
+function updateCleanDocumentTitle(document: CleanDocument, title: string): CleanDocument {
+  return { ...cloneCleanDocument(document), title };
+}
+
+function updateCleanDocumentBlockText(document: CleanDocument, targetKey: string, text: string): CleanDocument {
+  const next = cloneCleanDocument(document);
+  if (Array.isArray(next.blocks)) {
+    next.blocks = next.blocks.map((block, index) => (cleanBlockKey(block, index) === targetKey ? { ...block, text } : block));
+    return next;
+  }
+  next.pages = (next.pages ?? []).map((page) => ({
+    ...page,
+    blocks: (page.blocks ?? []).map((block, index) => (cleanBlockKey({ ...block, page_no: block.page_no ?? page.page_no }, index) === targetKey ? { ...block, text } : block))
+  }));
+  return next;
+}
+
+function fitTextareaToContent(element: HTMLTextAreaElement | null) {
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${element.scrollHeight}px`;
 }
 
 function firstTextPreviewExport(exports: ExportRecord[]): ExportRecord | undefined {
@@ -1303,26 +1351,46 @@ function PreviewPane({ bundle }: { bundle: TaskBundle }) {
 function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => void }) {
   const [cleanDocument, setCleanDocument] = useState<CleanDocument | null>(null);
   const [cleanStatus, setCleanStatus] = useState<"loading" | "ready" | "waiting">("loading");
+  const [documentSource, setDocumentSource] = useState<"clean" | "edited">("clean");
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
   const [showMedia, setShowMedia] = useState(false);
 
   useEffect(() => {
     setCleanStatus("loading");
-    requestJson<CleanDocument>(`/api/tasks/${bundle.task.task_id}/clean-document`)
-      .then((document) => {
-        setCleanDocument(document);
+    setIsEditing(false);
+    setHasUnsavedChanges(false);
+    setEditError(null);
+    requestJson<EditableDocumentResponse>(`/api/tasks/${bundle.task.task_id}/edited-document`)
+      .then((response) => {
+        setCleanDocument(response.document);
+        setDocumentSource(response.source);
         setCleanStatus("ready");
       })
       .catch(() => {
         setCleanDocument(null);
+        setDocumentSource("clean");
         setCleanStatus("waiting");
       });
   }, [bundle.task.task_id, bundle.task.progress]);
 
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [hasUnsavedChanges]);
+
   const cleanBlocks = cleanBlocksFromDocument(cleanDocument).filter((block) => {
-    if (blockHasMedia(block)) return showMedia;
+    if (blockHasMedia(block)) return showMedia || isEditing;
     return Boolean(block.text?.trim());
   });
-  const previewBlocks = cleanBlocks.slice(0, 40);
+  const previewBlocks = isEditing ? cleanBlocks : cleanBlocks.slice(0, 40);
 
   function blockHasMedia(block: CleanBlock): boolean {
     return Boolean(block.is_graphical || ["figure", "image", "table", "formula"].includes(String(block.role ?? block.type ?? "")));
@@ -1335,10 +1403,113 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
     return `${API_BASE}/api/tasks/${bundle.task.task_id}/media/${encodeURIComponent(filename)}`;
   }
 
+  function updateTitle(title: string) {
+    setCleanDocument((document) => (document ? updateCleanDocumentTitle(document, title) : document));
+    setHasUnsavedChanges(true);
+    setEditError(null);
+  }
+
+  function updateBlockText(block: CleanBlock, index: number, text: string) {
+    const key = cleanBlockKey(block, index);
+    setCleanDocument((document) => (document ? updateCleanDocumentBlockText(document, key, text) : document));
+    setHasUnsavedChanges(true);
+    setEditError(null);
+  }
+
+  async function saveEditedDocument() {
+    if (!cleanDocument || isSaving) return;
+    setIsSaving(true);
+    setEditError(null);
+    try {
+      const response = await requestJson<EditableDocumentResponse>(`/api/tasks/${bundle.task.task_id}/edited-document`, {
+        method: "PUT",
+        body: JSON.stringify({ document: cleanDocument }),
+      });
+      setCleanDocument(response.document);
+      setDocumentSource(response.source);
+      setHasUnsavedChanges(false);
+      setIsEditing(false);
+    } catch (reason) {
+      setEditError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function resetEditedDocument() {
+    if (isSaving) return;
+    const shouldReset = window.confirm("重置后会放弃当前人工稿，恢复为系统清洗稿。是否继续？");
+    if (!shouldReset) return;
+    setIsSaving(true);
+    setEditError(null);
+    try {
+      const response = await requestJson<EditableDocumentResponse>(`/api/tasks/${bundle.task.task_id}/edited-document/reset`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setCleanDocument(response.document);
+      setDocumentSource(response.source);
+      setHasUnsavedChanges(false);
+      setIsEditing(false);
+    } catch (reason) {
+      setEditError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function startEditing() {
+    if (cleanStatus !== "ready") return;
+    setIsEditing(true);
+    setShowMedia(true);
+    setEditError(null);
+  }
+
+  async function cancelEditing() {
+    if (hasUnsavedChanges) {
+      const shouldDiscard = window.confirm("当前修改尚未保存，是否放弃本次修改？");
+      if (!shouldDiscard) return;
+      try {
+        const response = await requestJson<EditableDocumentResponse>(`/api/tasks/${bundle.task.task_id}/edited-document`);
+        setCleanDocument(response.document);
+        setDocumentSource(response.source);
+      } catch (reason) {
+        setEditError(reason instanceof Error ? reason.message : String(reason));
+        return;
+      }
+    }
+    setHasUnsavedChanges(false);
+    setIsEditing(false);
+    setEditError(null);
+  }
+
   return (
     <section className="pane text-pane">
       <div className="pane-title">
         <h2>阅读稿预览</h2>
+        <div className="edit-actions">
+          {!isEditing ? (
+            <button className="edit-action" type="button" onClick={startEditing} disabled={cleanStatus !== "ready"} title="编辑阅读稿">
+              <Pencil size={15} />
+              <span>编辑</span>
+            </button>
+          ) : (
+            <>
+              <button className="edit-action primary" type="button" onClick={saveEditedDocument} disabled={!hasUnsavedChanges || isSaving} title="保存人工稿">
+                <Save size={15} />
+                <span>{isSaving ? "保存中" : "保存"}</span>
+              </button>
+              <button className="edit-action" type="button" onClick={cancelEditing} disabled={isSaving} title="退出编辑">
+                <X size={15} />
+                <span>退出</span>
+              </button>
+            </>
+          )}
+          <button className="edit-action" type="button" onClick={resetEditedDocument} disabled={cleanStatus !== "ready" || isSaving || documentSource !== "edited"} title="恢复系统清洗稿">
+            <RotateCcw size={15} />
+            <span>重置</span>
+          </button>
+        </div>
         <label className="media-toggle" title="显示图片和表格">
           <input
             type="checkbox"
@@ -1350,10 +1521,25 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
           </span>
           <span className="media-toggle-label">图片</span>
         </label>
-        <span className="live-dot">{cleanStatus === "ready" ? "已生成" : "实时更新"}</span>
+        <span className="live-dot">{cleanStatus === "ready" ? (documentSource === "edited" ? "人工稿" : "已生成") : "实时更新"}</span>
       </div>
       <article className="reading-page">
-        <h3>{cleanDocument?.title || bundle.task.original_name.replace(/\.[^.]+$/, "")}</h3>
+        {editError && <div className="edit-error">{editError}</div>}
+        {hasUnsavedChanges && <div className="edit-unsaved">有未保存修改</div>}
+        {isEditing ? (
+          <textarea
+            className="edit-title-input"
+            value={cleanDocument?.title || bundle.task.original_name.replace(/\.[^.]+$/, "")}
+            rows={1}
+            ref={fitTextareaToContent}
+            onChange={(event) => {
+              fitTextareaToContent(event.currentTarget);
+              updateTitle(event.target.value);
+            }}
+          />
+        ) : (
+          <h3>{cleanDocument?.title || bundle.task.original_name.replace(/\.[^.]+$/, "")}</h3>
+        )}
         {cleanStatus !== "ready" && <WaitingReadingPreview task={bundle.task} />}
         {cleanStatus === "ready" && previewBlocks.length === 0 && <p>清洗文档已生成，但正文块为空，请查看 OCR 或清洗报告。</p>}
         {cleanStatus === "ready" &&
@@ -1373,10 +1559,24 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
                   ) : (
                     <div className="media-missing">媒体素材未生成</div>
                   )}
-                  {block.text && (
-                    <p className={block.type === "caption" || block.role === "caption" ? "media-caption" : ""}>
-                      {block.text}
-                    </p>
+                  {isEditing ? (
+                    <textarea
+                      className="edit-block-input media-caption-input"
+                      value={block.text ?? ""}
+                      rows={1}
+                      ref={fitTextareaToContent}
+                      placeholder="补充图片、表格或公式说明"
+                      onChange={(event) => {
+                        fitTextareaToContent(event.currentTarget);
+                        updateBlockText(block, index, event.target.value);
+                      }}
+                    />
+                  ) : (
+                    block.text && (
+                      <p className={block.type === "caption" || block.role === "caption" ? "media-caption" : ""}>
+                        {block.text}
+                      </p>
+                    )
                   )}
                   {block.role === "table" && !block.is_graphical && (
                     <div className="media-table-marker">
@@ -1384,6 +1584,21 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
                     </div>
                   )}
                 </div>
+              );
+            }
+            if (isEditing) {
+              return (
+                <textarea
+                  className={`edit-block-input ${block.type === "heading" || block.role === "title" ? "heading" : block.type === "formula" || block.role === "formula" ? "formula" : ""}`}
+                  key={`${block.page_no ?? "p"}-${index}`}
+                  value={block.text ?? ""}
+                  rows={1}
+                  ref={fitTextareaToContent}
+                  onChange={(event) => {
+                    fitTextareaToContent(event.currentTarget);
+                    updateBlockText(block, index, event.target.value);
+                  }}
+                />
               );
             }
             return (

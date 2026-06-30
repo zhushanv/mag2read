@@ -4,8 +4,9 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from backend.app.core.auth_dependencies import get_current_user
 from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.models.task import User
+from backend.app.modules.edited_document import load_editable_document, reset_edited_document, save_edited_document
 from backend.app.schemas.task import (
     ExportRecordRead,
     TaskCreate,
@@ -289,6 +291,46 @@ def get_task_page_ocr(task_id: str, page_no: int, current_user: User = Depends(g
 def get_clean_document(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = ensure_user_task(db, task_id, current_user)
     return read_task_json(task, "clean", "document.json")
+
+
+@router.get("/{task_id}/edited-document")
+def get_edited_document(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
+    try:
+        return load_editable_document(Path(task.storage_dir))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid editable document JSON") from exc
+
+
+@router.put("/{task_id}/edited-document")
+def put_edited_document(
+    task_id: str,
+    payload: dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = ensure_user_task(db, task_id, current_user)
+    try:
+        return save_edited_document(Path(task.storage_dir), payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid existing edited document JSON") from exc
+
+
+@router.post("/{task_id}/edited-document/reset")
+def post_reset_edited_document(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
+    try:
+        return reset_edited_document(Path(task.storage_dir))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid clean document JSON") from exc
 
 
 @router.get("/{task_id}/pages/{page_no}/crop")
