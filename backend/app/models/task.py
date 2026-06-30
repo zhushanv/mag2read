@@ -11,10 +11,93 @@ class User(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     username = Column(String(64), nullable=False, unique=True)
+    email = Column(String(255), nullable=True, unique=True)
+    display_name = Column(String(100), nullable=True)
+    avatar_url = Column(String(500), nullable=True)
     password_hash = Column(String(255), nullable=True)
     role = Column(String(32), nullable=False, default="user")
+    status = Column(String(32), nullable=False, default="active")
+    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class EmailVerificationCode(Base):
+    __tablename__ = "email_verification_codes"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    email = Column(String(255), nullable=False)
+    code_hash = Column(String(255), nullable=False)
+    purpose = Column(String(32), nullable=False, default="login")
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    send_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_email_codes_email_created", "email", "created_at"),
+        Index("idx_email_codes_expires", "expires_at"),
+    )
+
+
+class OAuthAccount(Base):
+    __tablename__ = "oauth_accounts"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(32), nullable=False)
+    provider_user_id = Column(String(128), nullable=False)
+    email = Column(String(255), nullable=True)
+    nickname = Column(String(100), nullable=True)
+    avatar_url = Column(String(500), nullable=True)
+    raw_profile = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_oauth_provider_user"),
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(128), nullable=False, unique=True)
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    refresh_token_hash = Column(String(255), nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_sessions_expires", "expires_at"),
+    )
+
+
+class AuthAuditLog(Base):
+    __tablename__ = "auth_audit_logs"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, nullable=True)
+    email = Column(String(255), nullable=True)
+    action = Column(String(64), nullable=False)
+    success = Column(Boolean, nullable=False)
+    ip_address = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    detail = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_auth_logs_user_created", "user_id", "created_at"),
+        Index("idx_auth_logs_email_created", "email", "created_at"),
+        Index("idx_auth_logs_action_created", "action", "created_at"),
+    )
 
 
 class Task(Base):

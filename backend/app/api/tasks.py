@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from backend.app.core.auth_dependencies import get_current_user
 from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
+from backend.app.models.task import User
 from backend.app.schemas.task import (
     ExportRecordRead,
     TaskCreate,
@@ -65,6 +67,13 @@ def ensure_task(db: Session, task_id: str):
     return task
 
 
+def ensure_user_task(db: Session, task_id: str, current_user: User):
+    task = ensure_task(db, task_id)
+    if task.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="No permission")
+    return task
+
+
 def task_file_path(task, *parts: str) -> Path:
     path = (Path(task.storage_dir).resolve() / Path(*parts)).resolve()
     task_dir = Path(task.storage_dir).resolve()
@@ -97,7 +106,8 @@ def write_task_metadata(task_dir: Path, values: dict) -> None:
 
 
 @router.post("", response_model=TaskRead)
-def create_task(data: TaskCreate, db: Session = Depends(get_db)):
+def create_task(data: TaskCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    data.user_id = current_user.id
     return task_service.create_task(db, data)
 
 
@@ -108,6 +118,7 @@ async def upload_task_file(
     processing_mode: str = Form(default="auto"),
     task_id: str | None = Form(default=None),
     auto_start: bool = Form(default=True),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
@@ -125,6 +136,7 @@ async def upload_task_file(
         db,
         TaskCreate(
             task_id=task_id,
+            user_id=current_user.id,
             original_name=original_name,
             input_type=input_type,
             output_format=output_format,
@@ -190,43 +202,45 @@ async def upload_task_file(
 def list_tasks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return task_service.list_tasks(db, limit=limit, offset=offset)
+    user_id = None if current_user.role == "admin" else current_user.id
+    return task_service.list_tasks(db, limit=limit, offset=offset, user_id=user_id)
 
 
 @router.get("/{task_id}", response_model=TaskRead)
-def get_task(task_id: str, db: Session = Depends(get_db)):
-    return ensure_task(db, task_id)
+def get_task(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return ensure_user_task(db, task_id, current_user)
 
 
 @router.patch("/{task_id}", response_model=TaskRead)
-def update_task(task_id: str, data: TaskUpdate, db: Session = Depends(get_db)):
-    task = ensure_task(db, task_id)
+def update_task(task_id: str, data: TaskUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
     return task_service.update_task(db, task, data)
 
 
 @router.get("/{task_id}/steps", response_model=list[TaskStepRead])
-def list_task_steps(task_id: str, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def list_task_steps(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     return task_service.list_task_steps(db, task_id)
 
 
 @router.get("/{task_id}/files", response_model=list[TaskFileRead])
-def list_task_files(task_id: str, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def list_task_files(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     return task_service.list_task_files(db, task_id)
 
 
 @router.get("/{task_id}/pages", response_model=list[TaskPageRead])
-def list_task_pages(task_id: str, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def list_task_pages(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     return task_service.list_task_pages(db, task_id)
 
 
 @router.get("/{task_id}/pages/{page_no}", response_model=TaskPageRead)
-def get_task_page(task_id: str, page_no: int, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def get_task_page(task_id: str, page_no: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     page = task_service.get_task_page(db, task_id, page_no)
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -234,8 +248,8 @@ def get_task_page(task_id: str, page_no: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/pages/{page_no}/image")
-def get_task_page_image(task_id: str, page_no: int, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def get_task_page_image(task_id: str, page_no: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     page = task_service.get_task_page(db, task_id, page_no)
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -243,11 +257,11 @@ def get_task_page_image(task_id: str, page_no: int, db: Session = Depends(get_db
     path = Path(page.image_path).resolve()
     task_dir = Path(page.image_path).resolve()
     if not path.exists():
-        task = ensure_task(db, task_id)
+        task = ensure_user_task(db, task_id, current_user)
         path = task_file_path(task, "pages", f"page_{page_no:03d}.png")
         task_dir = Path(task.storage_dir).resolve()
     else:
-        task = ensure_task(db, task_id)
+        task = ensure_user_task(db, task_id, current_user)
         task_dir = Path(task.storage_dir).resolve()
 
     if path != task_dir and task_dir not in path.parents:
@@ -258,30 +272,32 @@ def get_task_page_image(task_id: str, page_no: int, db: Session = Depends(get_db
 
 
 @router.get("/{task_id}/pages/{page_no}/layout")
-def get_task_page_layout(task_id: str, page_no: int, db: Session = Depends(get_db)):
-    task = ensure_task(db, task_id)
+def get_task_page_layout(task_id: str, page_no: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
     return read_task_json(task, "layout", f"page_{page_no:03d}.json")
 
 
 @router.get("/{task_id}/pages/{page_no}/ocr")
-def get_task_page_ocr(task_id: str, page_no: int, db: Session = Depends(get_db)):
-    task = ensure_task(db, task_id)
+def get_task_page_ocr(task_id: str, page_no: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
     return read_task_json(task, "ocr", f"page_{page_no:03d}.json")
 
 
 @router.get("/{task_id}/clean-document")
-def get_clean_document(task_id: str, db: Session = Depends(get_db)):
-    task = ensure_task(db, task_id)
+def get_clean_document(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = ensure_user_task(db, task_id, current_user)
     return read_task_json(task, "clean", "document.json")
 
 
 @router.get("/{task_id}/exports", response_model=list[ExportRecordRead])
-def list_task_exports(task_id: str, db: Session = Depends(get_db)):
-    ensure_task(db, task_id)
+def list_task_exports(task_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_user_task(db, task_id, current_user)
     return task_service.list_export_records(db, task_id)
 
 
 @router.put("/{task_id}/steps", response_model=TaskStepRead)
-def upsert_task_step(task_id: str, data: TaskStepUpsert, db: Session = Depends(get_db)):
+def upsert_task_step(task_id: str, data: TaskStepUpsert, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
     ensure_task(db, task_id)
     return task_service.upsert_task_step(db, task_id, data)

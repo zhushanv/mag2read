@@ -32,6 +32,24 @@ class Settings(BaseSettings):
     baidu_ocr_api_key: str | None = None
     baidu_ocr_secret_key: str | None = None
     baidu_ocr_access_token: str | None = None
+    auth_cookie_name: str = "mag2read_session"
+    auth_session_days: int = 14
+    auth_code_ttl_minutes: int = 5
+    auth_code_send_interval_seconds: int = 60
+    auth_code_secret: str = "change-me"
+    smtp_host: str | None = None
+    smtp_port: int = 465
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str | None = None
+    wechat_app_id: str | None = None
+    wechat_app_secret: str | None = None
+    wechat_redirect_uri: str | None = None
+    auth_captcha_enabled: bool = False
+    turnstile_secret_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),

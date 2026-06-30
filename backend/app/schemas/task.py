@@ -11,6 +11,7 @@ from backend.app.services.enums import InputType, TaskStage, TaskStatus
 
 class TaskCreate(BaseModel):
     task_id: str | None = None
+    user_id: int | None = None
     original_name: str = Field(..., max_length=255)
     input_type: InputType = InputType.PDF
     output_format: str | None = "markdown,epub"

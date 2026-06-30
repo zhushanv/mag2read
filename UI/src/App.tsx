@@ -21,6 +21,10 @@ import PipelineFlow from "./components/PipelineFlow";
 // FluidBackground removed — using CSS-only background
 import type { CSSProperties, ChangeEvent, DragEvent, FormEvent } from "react";
 import UploadCard from "./UploadCard";
+import heroImage from "../icons/heroPage/hero-transparent.png";
+import structureImage from "../icons/heroPage/structure-transparent.png";
+import ocrImage from "../icons/heroPage/ocr-transparent.png";
+import exportImage from "../icons/heroPage/exportFile-transparent.png";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const STAGE_ORDER = ["render", "layout_detect", "layout_refine", "ocr", "text_cleaning", "document_build", "export"];
@@ -115,6 +119,14 @@ type TaskSocketMessage =
     };
 type ProcessingMode = "auto" | "local" | "cloud";
 
+type AuthUser = {
+  id: number;
+  email: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+  role: string;
+};
+
 type PreviewState = {
   exportId: number | null;
   title: string;
@@ -174,10 +186,27 @@ type CleanDocument = {
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, init);
+  const response = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    ...init,
+    headers: {
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...init?.headers,
+    },
+  });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `HTTP ${response.status}`);
+    let message: string | null = null;
+    try {
+      const payload = JSON.parse(text) as { detail?: unknown; message?: unknown };
+      const detail = payload.detail ?? payload.message;
+      if (typeof detail === "string") {
+        message = detail;
+      }
+    } catch {
+      message = null;
+    }
+    throw new Error(message || text || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
@@ -313,10 +342,14 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [bundle, setBundle] = useState<TaskBundle | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [showLanding, setShowLanding] = useState(true);
+  const [showLogin, setShowLogin] = useState(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [formats, setFormats] = useState<string[]>(["epub", "markdown", "docx"]);
-  const [processingMode, setProcessingMode] = useState<ProcessingMode>("auto");
- const [autoStart, setAutoStart] = useState(true);
+  const processingMode: ProcessingMode = "auto";
+ const autoStart = true;
  const [aiOpen, setAiOpen] = useState(false);
  const [loading, setLoading] = useState(false);
  const [error, setError] = useState<string | null>(null);
@@ -326,7 +359,22 @@ export default function App() {
 
   const currentTask = bundle?.task ?? tasks.find((item) => item.task_id === selectedTaskId) ?? null;
 
+  async function loadCurrentUser() {
+    try {
+      const user = await requestJson<AuthUser>("/api/auth/me");
+      setCurrentUser(user);
+    } catch {
+      setCurrentUser(null);
+    } finally {
+      setAuthReady(true);
+    }
+  }
+
   async function loadTasks() {
+    if (!currentUser) {
+      setTasks([]);
+      return;
+    }
     const result = await requestJson<Task[]>("/api/tasks?limit=20");
     setTasks(result);
   }
@@ -346,8 +394,13 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadTasks().catch((reason: unknown) => setError(String(reason)));
+    loadCurrentUser();
   }, []);
+
+  useEffect(() => {
+    if (!authReady) return;
+    loadTasks().catch((reason: unknown) => setError(String(reason)));
+  }, [authReady, currentUser]);
 
   useEffect(() => {
     if (!selectedTaskId) return;
@@ -428,6 +481,11 @@ export default function App() {
  
   async function uploadFile(event: FormEvent) {
     event.preventDefault();
+    if (!currentUser) {
+      setShowLogin(true);
+      setShowLanding(false);
+      return;
+    }
     if (!selectedFile) {
       setError("请选择 PDF、JPG 或 PNG 文件");
       return;
@@ -470,7 +528,39 @@ export default function App() {
  return (
    <main className="desktop-shell">
 
-     <TopBar onRefresh={() => loadTasks()} onHome={() => { setSelectedTaskId(null); setBundle(null); }} />
+     <TopBar
+       isLanding={!currentTask && showLanding}
+       currentUser={currentUser}
+       onRefresh={() => loadTasks()}
+       onHome={() => {
+         setSelectedTaskId(null);
+         setBundle(null);
+         setShowLanding(true);
+         setShowLogin(false);
+       }}
+       onStart={() => {
+         if (currentUser) {
+           setShowLanding(false);
+           setShowLogin(false);
+         } else {
+           setShowLanding(false);
+           setShowLogin(true);
+         }
+       }}
+       onLogin={() => {
+         setShowLanding(false);
+         setShowLogin(true);
+       }}
+       onLogout={async () => {
+         await requestJson("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+         setCurrentUser(null);
+         setTasks([]);
+         setSelectedTaskId(null);
+         setBundle(null);
+         setShowLanding(true);
+         setShowLogin(false);
+       }}
+     />
 
       {error && (
         <div className="notice">
@@ -481,9 +571,51 @@ export default function App() {
         </div>
       )}
      <AnimatePresence mode="wait">
-     {!currentTask && (
+     {!currentTask && showLogin && (
        <motion.div
-         key="home"
+         key="login"
+         initial={{ opacity: 0, y: 20 }}
+         animate={{ opacity: 1, y: 0 }}
+         exit={{ opacity: 0, y: -16 }}
+         transition={{ duration: 0.3, ease: "easeInOut" }}
+       >
+        <LoginPanel
+          onBack={() => {
+            setShowLogin(false);
+            setShowLanding(true);
+          }}
+          onSuccess={(user) => {
+            setCurrentUser(user);
+            setShowLogin(false);
+            setShowLanding(false);
+            loadTasks().catch(() => undefined);
+          }}
+        />
+       </motion.div>
+     )}
+
+     {!currentTask && !showLogin && showLanding && (
+       <motion.div
+         key="landing"
+         initial={{ opacity: 0, y: 20 }}
+         animate={{ opacity: 1, y: 0 }}
+         exit={{ opacity: 0, y: -16 }}
+         transition={{ duration: 0.3, ease: "easeInOut" }}
+       >
+        <LandingPage onStart={() => {
+          if (currentUser) {
+            setShowLanding(false);
+          } else {
+            setShowLanding(false);
+            setShowLogin(true);
+          }
+        }} />
+       </motion.div>
+     )}
+
+     {!currentTask && !showLogin && !showLanding && (
+       <motion.div
+         key="upload"
          initial={{ opacity: 0, y: 20 }}
          animate={{ opacity: 1, y: 0 }}
          exit={{ opacity: 0, y: -16 }}
@@ -496,10 +628,6 @@ export default function App() {
          tasks={tasks}
          formats={formats}
          onToggleFormat={toggleFormat}
-         processingMode={processingMode}
-         autoStart={autoStart}
-         onSetProcessingMode={setProcessingMode}
-         onSetAutoStart={setAutoStart}
          onDrop={onDrop}
          onDragOver={onDragOver}
          onDragLeave={onDragLeave}
@@ -557,22 +685,228 @@ export default function App() {
   );
 }
 
-function TopBar({ onRefresh, onHome }: { onRefresh: () => void; onHome: () => void }) {
+function TopBar({
+  isLanding,
+  currentUser,
+  onRefresh,
+  onHome,
+  onStart,
+  onLogin,
+  onLogout
+}: {
+  isLanding: boolean;
+  currentUser: AuthUser | null;
+  onRefresh: () => void;
+  onHome: () => void;
+  onStart: () => void;
+  onLogin: () => void;
+  onLogout: () => void;
+}) {
   return (
     <header className="topbar">
-      <div className="brand">
-        <button className="icon-button" aria-label="返回首页" onClick={onHome}>
-          <ArrowLeft size={15} />
-        </button>
+      <button className="brand brand-button" type="button" aria-label="返回首页" onClick={onHome}>
         <LogoBookIcon size={22} />
         <strong>Mag2Read</strong>
-      </div>
+      </button>
       <div className="top-actions">
-        <button className="icon-button" aria-label="刷新任务" onClick={onRefresh}>
-          <RefreshCw size={17} />
-        </button>
+        {isLanding ? (
+          currentUser ? (
+            <>
+              <span className="user-chip">{currentUser.display_name || currentUser.email}</span>
+              <button className="nav-button secondary" type="button" onClick={onLogout}>退出</button>
+            </>
+          ) : (
+            <>
+              <button className="nav-button secondary" type="button" onClick={onLogin}>登录</button>
+              <button className="nav-button primary" type="button" onClick={onStart}>免费开始</button>
+            </>
+          )
+        ) : (
+          <>
+            {currentUser && <span className="user-chip">{currentUser.display_name || currentUser.email}</span>}
+            <button className="icon-button" aria-label="刷新任务" onClick={onRefresh}>
+              <RefreshCw size={17} />
+            </button>
+            {currentUser && <button className="nav-button secondary compact" type="button" onClick={onLogout}>退出</button>}
+          </>
+        )}
       </div>
     </header>
+  );
+}
+
+function LoginPanel({ onBack, onSuccess }: { onBack: () => void; onSuccess: (user: AuthUser) => void }) {
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [debugCode, setDebugCode] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function requestCode(event: FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage(null);
+    try {
+      const result = await requestJson<{ message: string; cooldown_seconds: number; debug_code?: string | null }>("/api/auth/email/request-code", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      setCodeSent(true);
+      setDebugCode(result.debug_code ?? null);
+      setMessage(result.debug_code ? `开发环境验证码：${result.debug_code}` : result.message);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function verifyCode(event: FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage(null);
+    try {
+      const result = await requestJson<{ user: AuthUser }>("/api/auth/email/verify-code", {
+        method: "POST",
+        body: JSON.stringify({ email, code }),
+      });
+      onSuccess(result.user);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="login-screen">
+      <div className="login-panel">
+        <button className="login-back" type="button" onClick={onBack}>
+          <ArrowLeft size={18} />
+          返回首页
+        </button>
+        <div className="login-brand">
+          <LogoBookIcon size={30} />
+          <strong>Mag2Read</strong>
+        </div>
+        <h1>登录 Mag2Read</h1>
+        <p>使用邮箱验证码继续，无需设置密码。</p>
+
+        <form className="login-form" onSubmit={codeSent ? verifyCode : requestCode}>
+          <label>
+            邮箱
+            <input
+              type="email"
+              value={email}
+              placeholder="name@example.com"
+              onChange={(event) => setEmail(event.target.value)}
+              disabled={loading || codeSent}
+              required
+            />
+          </label>
+          {codeSent && (
+            <label>
+              验证码
+              <input
+                inputMode="numeric"
+                value={code}
+                placeholder="请输入 6 位验证码"
+                onChange={(event) => setCode(event.target.value)}
+                disabled={loading}
+                required
+              />
+            </label>
+          )}
+          <button className="login-submit" type="submit" disabled={loading}>
+            {loading ? "处理中..." : codeSent ? "登录" : "继续"}
+          </button>
+        </form>
+
+        {message && <p className={debugCode ? "login-debug" : "login-message"}>{message}</p>}
+        {codeSent && (
+          <button className="login-link" type="button" onClick={() => { setCodeSent(false); setCode(""); setDebugCode(null); }}>
+            重新填写邮箱
+          </button>
+        )}
+
+        <div className="login-divider"><span>OR</span></div>
+        <button className="oauth-button" type="button" onClick={() => { window.location.href = `${API_BASE}/api/auth/oauth/google/start`; }}>
+          Continue with Google
+        </button>
+        <button className="oauth-button" type="button" onClick={() => { window.location.href = `${API_BASE}/api/auth/oauth/wechat/start`; }}>
+          微信登录
+        </button>
+        <small>登录即表示你同意 Mag2Read 用于保存转换历史和保护任务访问权限。</small>
+      </div>
+      <div className="login-preview" aria-hidden="true">
+        <img src={heroImage} alt="" />
+      </div>
+    </section>
+  );
+}
+
+function LandingPage({ onStart }: { onStart: () => void }) {
+  const features = [
+    {
+      image: structureImage,
+      label: "01 · 智能版面分析",
+      title: "理解版面，而不只是看见文字",
+      description: "自动识别标题、双栏正文、图片、图注与表格，理清阅读顺序，完整保留原文的版面逻辑与结构层级。"
+    },
+    {
+      image: ocrImage,
+      label: "02 · 高精度 OCR",
+      title: "逐行扫描，精准转录",
+      description: "柔和扫描线逐行识别，将扫描件与图片中的文字转换为整齐、可编辑的数字文本，细节清晰，支持多语言。"
+    },
+    {
+      image: exportImage,
+      label: "03 · 多文件格式导出",
+      title: "一份文档，随处可用",
+      description: "整理完成的文档可一键分发为多种格式 —— EPUB、DOCX、Markdown、HTML，随处可读、随时可改。"
+    }
+  ];
+
+  return (
+    <section className="landing-screen">
+      <div className="landing-hero">
+        <div className="landing-copy">
+          <h1>
+            把纸质杂志与论文，
+            <span>一键变成</span>
+            数字文档
+          </h1>
+          <p className="landing-subtitle">
+            Mag2Read 智能识别版面结构，精准还原标题、正文、图片与表格，直接导出 EPUB、DOCX、Markdown、HTML —— 随处可读，随时可改。
+          </p>
+          <button className="landing-cta" type="button" onClick={onStart}>
+            上传文档试一试
+          </button>
+        </div>
+        <div className="landing-visual" aria-hidden="true">
+          <img src={heroImage} alt="" />
+        </div>
+      </div>
+
+      <div className="landing-feature-head">
+        <h2>为什么选择 Mag2Read</h2>
+        <p>三步连贯的处理流程，温和而有序地还原你文档里的每一处结构。</p>
+      </div>
+
+      <div className="landing-feature-grid">
+        {features.map((feature) => (
+          <article className="landing-feature-card" key={feature.label}>
+            <div className="landing-feature-art">
+              <img src={feature.image} alt="" />
+            </div>
+            <p>{feature.label}</p>
+            <h3>{feature.title}</h3>
+            <span>{feature.description}</span>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -583,10 +917,6 @@ function HomePanel(props: {
   tasks: Task[];
   formats: string[];
   onToggleFormat: (format: string) => void;
-  processingMode: ProcessingMode;
-  autoStart: boolean;
-  onSetProcessingMode: (mode: ProcessingMode) => void;
-  onSetAutoStart: (value: boolean) => void;
   onDrop: (event: DragEvent<HTMLLabelElement>) => void;
   onDragOver: (event: DragEvent) => void;
   onDragLeave: () => void;
@@ -594,15 +924,8 @@ function HomePanel(props: {
   onSubmit: (event: FormEvent) => void;
   onSelectTask: (taskId: string) => void;
 }) {
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-
   return (
     <section className="home-screen">
-      <div className="headline">
-        <h1>把纸上的文字，交还给数字世界</h1>
-        <p className="headline-sub">智能解析扫描文档，一键导出可编辑文件</p>
-      </div>
-
       <form className="upload-form" onSubmit={props.onSubmit}>
         <UploadCard
           selectedFile={props.selectedFile}
@@ -633,109 +956,10 @@ function HomePanel(props: {
           ))}
         </div>
 
-        <div className="advanced-section">
-          <button
-            className="advanced-toggle"
-            type="button"
-            onClick={() => setAdvancedOpen(!advancedOpen)}
-          >
-            <ChevronDownIcon size={14} />
-            高级选项
-          </button>
-
-          {advancedOpen && (
-            <div className="advanced-panel">
-              <div className="advanced-row">
-                <span className="advanced-label">解析模式</span>
-                <div className="mode-group">
-                  {[
-                    { key: 'auto' as const, label: '自动选择', desc: '根据文档复杂度判断使用何种解析方式' },
-                    { key: 'local' as const, label: '本地解析', desc: '使用本地部署模型解析文件' },
-                    { key: 'cloud' as const, label: '云端解析', desc: '使用百度云 API 解析文件' },
-                  ].map((mode) => (
-                    <button
-                      key={mode.key}
-                      className={'mode-option' + (props.processingMode === mode.key ? ' active' : '')}
-                      type="button"
-                      onClick={() => props.onSetProcessingMode(mode.key)}
-                    >
-                      <strong>{mode.label}</strong>
-                      <small>{mode.desc}</small>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="advanced-divider" />
-              <div className="advanced-row">
-                <span className="advanced-label">自动开始</span>
-                <label className="auto-toggle">
-                  <input
-                    type="checkbox"
-                    checked={props.autoStart}
-                    onChange={(e) => props.onSetAutoStart(e.target.checked)}
-                  />
-                  <span className="auto-toggle-track">
-                    <span className="auto-toggle-thumb" />
-                  </span>
-                  <span>上传后立即开始处理</span>
-                </label>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="feature-grid">
-          <div className="feature-item">
-            <div className="feature-icon-box">
-              <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style={{color:"#0071e3"}}>
-                <rect x="3" y="3" width="20" height="20" rx="4" stroke="currentColor" strokeWidth="1.4" opacity=".7"/>
-                <path d="M7 9.5h12M7 13h8M7 16.5h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" opacity=".7"/>
-                <path d="m16 7.5 4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity=".7"/>
-              </svg>
-            </div>
-            <div className="feature-text">
-              <strong>智能版面分析</strong>
-              <small>自动检测标题、正文、图注，恢复双栏阅读顺序</small>
-            </div>
-          </div>
-          <div className="feature-divider" />
-          <div className="feature-item">
-            <div className="feature-icon-box">
-              <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style={{color:"#0071e3"}}>
-                <rect x="4" y="4" width="18" height="18" rx="3.5" stroke="currentColor" strokeWidth="1.4" opacity=".7"/>
-                <path d="M7 10.5l4-3 3 4 5-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" opacity=".7"/>
-                <circle cx="8.5" cy="16.5" r="1.2" fill="currentColor" opacity=".45"/>
-                <circle cx="13" cy="16.5" r="1.2" fill="currentColor" opacity=".45"/>
-                <circle cx="17.5" cy="16.5" r="1.2" fill="currentColor" opacity=".45"/>
-              </svg>
-            </div>
-            <div className="feature-text">
-              <strong>高精度 OCR</strong>
-              <small>识别扫描件中的印刷体文字，保留原始版式信息</small>
-            </div>
-          </div>
-          <div className="feature-divider" />
-          <div className="feature-item">
-            <div className="feature-icon-box">
-              <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style={{color:"#0071e3"}}>
-                <path d="M5 10V6.5a2 2 0 012-2h6.5l5 5v10a2 2 0 01-2 2H7a2 2 0 01-2-2v-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" opacity=".7"/>
-                <path d="M13.5 4.5v5a1 1 0 001 1h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" opacity=".7"/>
-                <path d="M3 16h10l-2.5-2.5M13 16l-2.5 2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" opacity=".7"/>
-              </svg>
-            </div>
-            <div className="feature-text">
-              <strong>多格式导出</strong>
-              <small>一键导出 DOCX、Markdown、ePub，适配不同阅读场景</small>
-            </div>
-          </div>
-        </div>
-
         <button className="primary-button" disabled={props.loading} type="submit">
           {props.loading ? "正在创建任务" : "开始解析"}
         </button>
       </form>
-
-      <p className="home-tagline">从扫描件到结构化文档，只需要一次上传</p>
 
       <RecentTasks tasks={props.tasks} onSelectTask={props.onSelectTask} />
     </section>

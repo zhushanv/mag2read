@@ -45,6 +45,7 @@ def create_task(db: Session, data: TaskCreate) -> Task:
         original_name=data.original_name,
         input_type=data.input_type.value,
         status=TaskStatus.PENDING.value,
+        user_id=data.user_id,
         current_stage=None,
         progress=0,
         storage_dir=data.storage_dir or default_storage_dir(task_id),
@@ -57,8 +58,10 @@ def create_task(db: Session, data: TaskCreate) -> Task:
     return task
 
 
-def list_tasks(db: Session, limit: int = 50, offset: int = 0) -> list[Task]:
+def list_tasks(db: Session, limit: int = 50, offset: int = 0, user_id: int | None = None) -> list[Task]:
     statement = select(Task).order_by(Task.created_at.desc()).offset(offset).limit(limit)
+    if user_id is not None:
+        statement = select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc()).offset(offset).limit(limit)
     return list(db.execute(statement).scalars().all())
 
 

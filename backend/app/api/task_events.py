@@ -6,8 +6,10 @@ from hashlib import sha1
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal
 from backend.app.schemas.task import TaskRead, TaskStepRead
+from backend.app.services import auth_service
 from backend.app.services import task_service
 from backend.app.services.enums import TaskStatus
 
@@ -24,11 +26,15 @@ TERMINAL_STATUSES = {
 @router.websocket("/ws/tasks/{task_id}")
 async def watch_task(websocket: WebSocket, task_id: str):
     await websocket.accept()
+    user_id, role = websocket_user(websocket)
+    if user_id is None:
+        await websocket.close(code=1008)
+        return
     last_signature = ""
 
     try:
         while True:
-            payload = build_task_event(task_id)
+            payload = build_task_event(task_id, user_id=user_id, role=role)
             if payload is None:
                 await websocket.send_text(json.dumps({"type": "task_missing", "task_id": task_id}))
                 await websocket.close(code=1008)
@@ -48,11 +54,28 @@ async def watch_task(websocket: WebSocket, task_id: str):
         return
 
 
-def build_task_event(task_id: str) -> dict | None:
+def websocket_user(websocket: WebSocket) -> tuple[int | None, str | None]:
+    settings = get_settings()
+    db = SessionLocal()
+    try:
+        session = auth_service.get_valid_session(db, websocket.cookies.get(settings.auth_cookie_name))
+        if session is None:
+            return None, None
+        user = auth_service.get_user(db, session.user_id)
+        if user is None or user.status != "active":
+            return None, None
+        return user.id, user.role
+    finally:
+        db.close()
+
+
+def build_task_event(task_id: str, *, user_id: int, role: str | None) -> dict | None:
     db = SessionLocal()
     try:
         task = task_service.get_task(db, task_id)
         if task is None:
+            return None
+        if task.user_id != user_id and role != "admin":
             return None
         steps = task_service.list_task_steps(db, task_id)
         return {
