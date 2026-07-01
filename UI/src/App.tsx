@@ -508,6 +508,70 @@ function AutoSizeTextarea({ value, className, placeholder, onChange }: {
   );
 }
 
+// ── 翻译辅助 ──
+
+/** 判断文本是否以非中文为主（适合显示翻译按钮） */
+function isNonChineseText(text: string | null | undefined): boolean {
+  if (!text || text.trim().length < 5) return false;
+  const stripped = text.trim();
+  const chineseChars = [...stripped].filter((c) => c >= "\u4e00" && c <= "\u9fff" || c >= "\u3400" && c <= "\u4dbf").length;
+  return chineseChars / stripped.length < 0.5;
+}
+
+function TranslateBlock({ block, taskId }: { block: CleanBlock; taskId: string }) {
+  const [translation, setTranslation] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const text = block.text ?? "";
+  const canTranslate = isNonChineseText(text);
+
+  async function handleTranslate() {
+    if (translation) {
+      setExpanded((prev) => !prev);
+      return;
+    }
+    setLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/api/translate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ text, source_lang: "auto", target_lang: "zh" }),
+      });
+      const data = await resp.json() as { translated: string | null };
+      if (data.translated) {
+        setTranslation(data.translated);
+        setExpanded(true);
+      }
+    } catch {
+      // 静默失败，不阻塞阅读
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!canTranslate) return null;
+
+  return (
+    <span className="translate-block-inner">
+      <button
+        type="button"
+        className="translate-btn"
+        onClick={handleTranslate}
+        disabled={loading}
+        title={expanded ? "收起翻译" : "翻译为中文"}
+      >
+        {loading ? "翻译中…" : "🌐 翻译"}
+      </button>
+      {expanded && translation && (
+        <span className="translate-text">{translation}</span>
+      )}
+    </span>
+  );
+}
+
+
 function stageStatus(stage: string, task: Task, step?: TaskStep): "done" | "active" | "failed" | "wait" {
   if (step?.status === "failed") return "failed";
   if (step?.status === "success" || step?.status === "skipped") return "done";
@@ -1706,11 +1770,14 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
               );
             }
             return (
-              createElement(
-                readingBlockTag(block),
-                { className: readingBlockClassName(block), key: `${block.page_no ?? "p"}-${index}` },
-                block.text
-              )
+              <div className="reading-block-wrap" key={`${block.page_no ?? "p"}-${index}`}>
+                {createElement(
+                  readingBlockTag(block),
+                  { className: readingBlockClassName(block) },
+                  block.text
+                )}
+                <TranslateBlock block={block} taskId={bundle.task.task_id} />
+              </div>
             );
           })}
       </article>
@@ -1823,11 +1890,14 @@ function FinalDocumentPreview({
                 );
               }
               return (
-                createElement(
-                  readingBlockTag(block),
-                  { className: readingBlockClassName(block), key: `final-text-${cleanBlockKey(block, index)}` },
-                  block.text
-                )
+                <div className="reading-block-wrap" key={`final-text-${cleanBlockKey(block, index)}`}>
+                  {createElement(
+                    readingBlockTag(block),
+                    { className: readingBlockClassName(block) },
+                    block.text
+                  )}
+                  <TranslateBlock block={block} taskId={bundle.task.task_id} />
+                </div>
               );
             })}
           </>
@@ -1838,6 +1908,30 @@ function FinalDocumentPreview({
 }
 
 function AiPanel({ bundle, onClose }: { bundle: TaskBundle; onClose: () => void }) {
+  const [polishing, setPolishing] = useState(false);
+  const [polishResult, setPolishResult] = useState<string | null>(null);
+  const [polishError, setPolishError] = useState<string | null>(null);
+
+  async function handlePolish() {
+    setPolishing(true);
+    setPolishResult(null);
+    setPolishError(null);
+    try {
+      const resp = await fetch(`${API_BASE}/api/tasks/${bundle.task.task_id}/polish?include_media=false`, {
+        credentials: "include",
+      });
+      if (!resp.ok) {
+        throw new Error(`请求失败 (${resp.status})`);
+      }
+      const data = await resp.json() as { content: string; stats: { total_blocks: number; translated: number; characters: number } };
+      setPolishResult(data.content);
+    } catch (err) {
+      setPolishError(err instanceof Error ? err.message : "整理失败");
+    } finally {
+      setPolishing(false);
+    }
+  }
+
   return (
     <aside className="ai-panel">
       <div className="pane-title">
@@ -1854,6 +1948,23 @@ function AiPanel({ bundle, onClose }: { bundle: TaskBundle; onClose: () => void 
         <button>提炼重点</button>
         <button>解释这段内容</button>
       </div>
+      <div className="ai-polish-section">
+        <button className="ai-polish-btn" onClick={handlePolish} disabled={polishing}>
+          <AiSparkleIcon size={16} />
+          <span>{polishing ? "整理中…" : "一键整理"}</span>
+        </button>
+        <p className="ai-polish-desc">
+          将非中文内容自动翻译整合，生成一份结构清晰的中文阅读稿。
+        </p>
+      </div>
+      {polishResult && (
+        <div className="polish-result">
+          <pre className="polish-content">{polishResult}</pre>
+        </div>
+      )}
+      {polishError && (
+        <div className="polish-error">{polishError}</div>
+      )}
       <div className="chat-bubble user">请帮我总结这篇文章的核心观点。</div>
       <div className="chat-bubble">任务 {bundle.task.task_id.slice(0, 8)} 正在构建结构化文本，完成后可生成更稳定的导读。</div>
       <div className="chat-input">

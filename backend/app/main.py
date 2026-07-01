@@ -8,6 +8,8 @@ from backend.app.api.exports import router as exports_router
 from backend.app.api.health import router as health_router
 from backend.app.api.task_events import router as task_events_router
 from backend.app.api.tasks import router as tasks_router
+from backend.app.api.translate import router as translate_router
+from backend.app.api.ai_polish import router as ai_polish_router
 from backend.app.core.config import get_settings
 
 
@@ -32,6 +34,8 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(exports_router)
     app.include_router(task_events_router)
+    app.include_router(translate_router)
+    app.include_router(ai_polish_router)
 
     @app.get("/")
     def root() -> dict[str, str]:

@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     def redis_url(self) -> str:
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
+    # Aliyun (Alibaba Cloud) Machine Translation
+    aliyun_translate_access_key: str | None = None
+    aliyun_translate_secret_key: str | None = None
+    aliyun_translate_region: str = "cn-hangzhou"
+
+    # Baidu Translation (separate from Baidu OCR credentials)
+    baidu_translate_app_id: str | None = None
+    baidu_translate_secret_key: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:
