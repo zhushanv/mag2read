@@ -12,3 +12,4 @@ PyMySQL
 redis
 celery
 python-multipart
+httpx
