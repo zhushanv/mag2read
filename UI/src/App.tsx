@@ -853,7 +853,7 @@ export default function App() {
            setSelectedTaskId(null);
            setBundle(null);
          }}
-         onRetry={() => loadTaskBundle(currentTask.task_id)}
+         onBackToEdit={() => { setSelectedTaskId(currentTask.task_id); setShowFinish(false); }}
        />
       </motion.div>
       )}
@@ -1866,7 +1866,7 @@ function AiPanel({ bundle, onClose }: { bundle: TaskBundle; onClose: () => void 
   );
 }
 
-function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: () => void; onRetry: () => void }) {
+function FinishPanel({ bundle, onBack, onBackToEdit }: { bundle: TaskBundle; onBack: () => void; onBackToEdit: () => void }) {
   const [regenerating, setRegenerating] = useState(false);
   const [downloadingFormat, setDownloadingFormat] = useState<string | null>(null);
   const [includeMedia, setIncludeMedia] = useState(true);
@@ -1880,7 +1880,7 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
         method: "POST",
         body: JSON.stringify({}),
       });
-      onRetry();
+      onBackToEdit();
     } catch {
       window.alert("导出失败，请稍后重试。");
     } finally {
@@ -1904,7 +1904,7 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
         record.format.toLowerCase() === format && Boolean(record.file_path?.includes(exportVariant))
       ) ?? [...records].reverse().find((record) => record.format.toLowerCase() === format);
       if (!latest) throw new Error("导出文件未生成");
-      onRetry();
+      onBackToEdit();
       const modeQuery = ["markdown", "html"].includes(format) && mode === "single" ? "?mode=single" : "";
       window.open(`${API_BASE}/api/exports/${latest.id}/download${modeQuery}`, "_blank", "noopener,noreferrer");
     } catch {
@@ -1934,7 +1934,13 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
       <section className="export-section">
         <div className="export-header">
           <h2>导出文件</h2>
-          <span className="export-count">{includeMedia ? "包含图片" : "仅文字"} · {bundle.exports.length} 个文件</span>
+          <span className="export-count">{includeMedia ? "包含图片" : "仅文字"} · {
+  new Set(
+    [...bundle.exports]
+      .filter(e => e.file_path?.includes(exportVariant))
+      .map(e => e.format)
+  ).size || bundle.exports.length
+} 个文件</span>
         </div>
         <div className="export-grid">
           {(() => {
@@ -2003,13 +2009,13 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
         <button className="secondary-button" onClick={onBack}>
           返回首页
         </button>
-        <button className="secondary-button" onClick={regenerateExports} disabled={regenerating}>
+        <button className="primary-button" onClick={regenerateExports} disabled={regenerating} title="修改左侧阅读稿后，点击这里基于最新内容重新生成所有格式">
           <RefreshCw size={17} />
-          {regenerating ? "导出中" : "重新导出最终稿"}
+          {regenerating ? "正在生成" : "基于阅读稿重新生成"}
         </button>
-        <button className="primary-button" onClick={onRetry}>
-          <RefreshCw size={17} />
-          刷新结果
+        <button className="secondary-button" onClick={onBackToEdit}>
+          <Pencil size={17} />
+          编辑阅读稿
         </button>
       </div>
     </section>
