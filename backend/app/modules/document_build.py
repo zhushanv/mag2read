@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""读取 clean/document.json，导出 Markdown（从清洗后文档模型生成输出）。"""
+"""Build a normalized document and Markdown from the final task draft."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from backend.app.modules.edited_document import load_export_document
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -69,8 +71,15 @@ def infer_document_title(pages: list[dict[str, Any]], fallback: str) -> str:
 
 
 def block_to_markdown(block: dict[str, Any]) -> list[str]:
-    text = block["text"]
+    text = str(block.get("text") or "")
     block_type = block["type"]
+    media_path = str(block.get("media_path") or "").strip()
+    if media_path:
+        alt = text or block.get("role") or block_type or "media"
+        lines = [f"![{alt}]({media_path})"]
+        if text:
+            lines.append(f"*{text}*")
+        return lines
     if block_type == "heading":
         level = int(block.get("level", 2))
         level = max(1, min(level, 6))
@@ -109,13 +118,13 @@ def render_markdown(document: dict[str, Any]) -> str:
 
 
 def build_document(task_dir: Path) -> dict[str, Any]:
-    doc_path = task_dir / "clean" / "document.json"
-    doc = load_json(doc_path)
+    doc = load_export_document(task_dir)
     pages = doc.get("pages", [])
     title = doc.get("title") or infer_document_title(pages, task_dir.name)
     chapters = build_chapters(pages)
     doc["title"] = title
     doc["chapters"] = chapters
+    doc["export_source"] = "edited" if (task_dir / "edited" / "document.json").exists() else "clean"
     doc["finished_at"] = datetime.now().isoformat(timespec="seconds")
     return doc
 

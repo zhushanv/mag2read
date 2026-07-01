@@ -70,6 +70,17 @@ def load_editable_document(task_dir: Path) -> dict[str, Any]:
     }
 
 
+def load_export_document(task_dir: Path) -> dict[str, Any]:
+    edited_path = edited_document_path(task_dir)
+    if edited_path.exists():
+        return read_json(edited_path)
+
+    clean_path = clean_document_path(task_dir)
+    if not clean_path.exists():
+        raise FileNotFoundError("clean/document.json does not exist")
+    return read_json(clean_path)
+
+
 def extract_document_payload(payload: dict[str, Any]) -> dict[str, Any]:
     document = payload.get("document") if isinstance(payload.get("document"), dict) else payload
     if not isinstance(document, dict):
