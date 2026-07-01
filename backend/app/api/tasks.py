@@ -15,7 +15,9 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.models.task import User
 from backend.app.modules.edited_document import load_editable_document, reset_edited_document, save_edited_document
+from backend.app.modules.export_document import run_export
 from backend.app.schemas.task import (
+    ExportRecordCreate,
     ExportRecordRead,
     TaskCreate,
     TaskFileCreate,
@@ -27,7 +29,7 @@ from backend.app.schemas.task import (
     TaskUpdate,
 )
 from backend.app.services import task_service
-from backend.app.services.enums import InputType
+from backend.app.services.enums import InputType, TaskStatus
 from io import BytesIO
 from PIL import Image
 
@@ -41,6 +43,13 @@ SUPPORTED_UPLOAD_SUFFIXES = {
     ".png": InputType.IMAGE,
 }
 SUPPORTED_PROCESSING_MODES = {"local", "cloud", "auto"}
+EXPORT_MIME_TYPES = {
+    "epub": "application/epub+zip",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "html": "text/html",
+    "markdown": "text/markdown",
+    "txt": "text/plain",
+}
 
 
 def safe_filename(filename: str) -> str:
@@ -107,6 +116,14 @@ def write_task_metadata(task_dir: Path, values: dict) -> None:
         metadata = {}
     metadata.update(values)
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_export_formats(value: str | None) -> list[str]:
+    supported = {"epub", "docx", "txt", "html", "markdown"}
+    if not value:
+        return ["epub"]
+    formats = [item.strip().lower() for item in value.split(",") if item.strip()]
+    return [fmt for fmt in formats if fmt in supported] or ["epub"]
 
 
 @router.post("", response_model=TaskRead)
@@ -391,6 +408,51 @@ def get_task_media(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Media file not found")
     return FileResponse(path, media_type="image/png", filename=safe_name)
+
+
+@router.post("/{task_id}/exports/regenerate", response_model=list[ExportRecordRead])
+def regenerate_task_exports(
+    task_id: str,
+    export_format: str | None = Query(default=None, alias="format"),
+    include_media: bool = Query(default=True),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = ensure_user_task(db, task_id, current_user)
+    task_dir = Path(task.storage_dir)
+    formats = parse_export_formats(export_format or task.output_format)
+    variant_role = "with_media" if include_media else "text_only"
+    try:
+        exports = run_export(task_dir, formats, include_media=include_media)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid document JSON") from exc
+
+    for fmt, file_path in exports.items():
+        path = Path(file_path)
+        task_service.add_export_record(
+            db,
+            task_id,
+            ExportRecordCreate(
+                format=fmt,
+                file_path=str(path),
+                file_size=path.stat().st_size if path.exists() else None,
+                status=TaskStatus.SUCCESS,
+            ),
+        )
+        task_service.add_task_file(
+            db,
+            task_id,
+            TaskFileCreate(
+                file_role=f"{fmt}_{variant_role}",
+                file_name=path.name,
+                file_path=str(path),
+                mime_type=EXPORT_MIME_TYPES.get(fmt),
+                file_size=path.stat().st_size if path.exists() else None,
+            ),
+        )
+    return task_service.list_export_records(db, task_id)
 
 
 @router.get("/{task_id}/exports", response_model=list[ExportRecordRead])

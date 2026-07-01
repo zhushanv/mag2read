@@ -382,6 +382,196 @@ HTML 可输出：
 - 没有人工编辑稿时，仍然可以从 `clean/document.json` 正常导出。
 - 缺失图片不会导致导出失败。
 
+### 第三阶段落地说明
+
+本阶段实际实现范围：
+
+- `document_build` 和 `export_document` 均改为优先读取 `edited/document.json`，不存在时回退到 `clean/document.json`。
+- 每次导出都会基于当前 pages 重新构建 chapters，避免人工编辑后旧 chapters 内容没有更新。
+- DOCX 导出支持嵌入 `media_path` 对应图片，并在图片下方输出人工修改后的说明文字。
+- Markdown 导出支持输出图片引用，并使用相对路径指向 `media` 图片。
+- HTML 导出支持 `<figure><img><figcaption>` 结构，并使用相对路径指向 `media` 图片。
+- HTML 和 Markdown 的文件内容默认使用相对路径引用 `media` 图片，便于预览和后续编辑。
+- 针对浏览器下载单个文件后图片路径断裂的问题，HTML 和 Markdown 的默认下载改为 ZIP 资源包，包内包含 `document.html` 或 `document.md`，以及同级 `media/` 图片目录。
+- HTML 和 Markdown 仍保留“单文件”下载入口，需要单文件转发或归档时，下载接口会临时把图片转成 `data:image/...;base64` 内嵌到文件里。
+- EPUB 导出会把 `media` 图片打包进电子书内部，不依赖外部文件路径。
+- TXT 导出无法嵌图，会输出图片文件名或图片缺失占位，并保留说明文字。
+- 新增接口：
+
+```text
+POST /api/tasks/{task_id}/exports/regenerate
+```
+
+- 完成页新增“重新导出最终稿”按钮，用户人工保存后可以重新生成导出文件。
+- 导出卡片会优先展示同格式的最新导出记录，避免继续下载编辑前的旧文件。
+- 产品交互已进一步收敛为“下载 = 基于当前阅读稿生成最新文件并下载”。点击任一格式的下载按钮时，前端会先调用：
+
+```text
+POST /api/tasks/{task_id}/exports/regenerate?format={format}
+```
+
+然后下载后端返回的最新导出记录，不再直接下载历史文件。
+
+HTML 和 Markdown 下载模式：
+
+```text
+GET /api/exports/{export_id}/download
+```
+
+默认返回 ZIP 资源包，适合日常编辑和交付：
+
+```text
+document.html 或 document.md
+media/
+  figure-001.png
+  figure-002.jpg
+```
+
+如需单文件版本，前端调用：
+
+```text
+GET /api/exports/{export_id}/download?mode=single
+```
+
+单文件模式会在下载时临时将图片内嵌为 base64，不改变磁盘上的导出稿。
+
+### 结果页预览逻辑调整
+
+结果页不再按照导出文件类型预览 Markdown、HTML 或 TXT 内容。导出格式只是下载形态，用户真正需要确认的是当前最终阅读稿。因此结果页预览区改为直接读取：
+
+```text
+GET /api/tasks/{task_id}/edited-document
+```
+
+并用前端阅读稿组件渲染 `document` 内容。页面展示的是当前保存的人工稿；如果还没有人工稿，则展示系统清洗稿。
+
+新的产品逻辑为：
+
+```text
+编辑的是阅读稿
+预览的是阅读稿
+下载时再从阅读稿生成对应格式文件
+```
+
+结果页导出卡片只负责“基于当前阅读稿生成并下载”，不再承担切换预览内容的职责。HTML 和 Markdown 的资源包下载、单文件下载都仍然保留，但它们属于下载层能力，不影响页面内最终稿预览。
+
+这样做的原因：
+
+- 避免用户误以为 Markdown、HTML、DOCX 是几份不同内容。
+- 让用户看到的内容与导出来源一致。
+- 页面内图片继续使用后端 `media` URL，加载快，也不受 ZIP、相对路径、base64 等导出细节影响。
+- 后续做块级定位、编辑、图片开关时，都可以围绕统一的阅读稿数据结构继续扩展。
+
+### 预览图片开关与导出内容范围
+
+结果页的“包含图片”开关不仅控制页面内预览，也控制下载文件的内容范围。
+
+产品规则：
+
+```text
+包含图片开启：预览和导出都包含文字、图片、图形化表格、公式等非文字内容。
+包含图片关闭：预览和导出都只包含文字内容。
+```
+
+前端点击下载时，会把当前开关状态传给后端：
+
+```text
+POST /api/tasks/{task_id}/exports/regenerate?format={format}&include_media=true
+POST /api/tasks/{task_id}/exports/regenerate?format={format}&include_media=false
+```
+
+后端在统一导出入口处理 `include_media`，而不是在 DOCX、HTML、Markdown、EPUB 各自的导出函数里分散判断。处理方式为：
+
+1. 先读取当前最终阅读稿。
+2. 如果 `include_media=false`，过滤掉 `figure`、`image`、图形化 `table`、`formula`、`is_graphical=true` 等媒体块。
+3. 用过滤后的 pages 重新构建 chapters。
+4. 再进入各格式导出函数。
+
+这样可以保证所有格式行为一致：
+
+- DOCX 纯文字版本不嵌入图片。
+- EPUB 纯文字版本不打包图片。
+- HTML/Markdown 纯文字资源包不包含 `media/` 图片引用。
+- HTML/Markdown 单文件版本在纯文字模式下也不会生成 base64 图片。
+
+导出文件名会区分内容范围：
+
+```text
+任务名-with-media.docx
+任务名-text-only.docx
+任务名-with-media.html
+任务名-text-only.html
+```
+
+导出卡片会根据当前开关优先展示对应版本的最新文件；如果当前版本还没有生成，则显示“点击生成”。
+
+### 段落级别编辑
+
+阅读稿编辑模式支持修改识别文本的“段落级别”。这个控件不是单纯修改显示样式，而是修改 block 的结构字段，保存后会写入 `edited/document.json`，并影响最终预览和导出结果。
+
+第一版支持的段落级别：
+
+```text
+正文
+一级标题
+二级标题
+三级标题
+引用/注释
+图片说明
+```
+
+字段映射：
+
+```text
+正文      -> type=paragraph, role=body,    删除 level
+一级标题  -> type=heading,   role=heading, level=1
+二级标题  -> type=heading,   role=heading, level=2
+三级标题  -> type=heading,   role=heading, level=3
+引用/注释 -> type=note,      role=note,    删除 level
+图片说明  -> type=caption,   role=caption, 删除 level
+```
+
+前端实现方式：
+
+1. 在阅读稿编辑模式下，每个普通文本块上方显示“段落级别”下拉控件。
+2. 用户切换级别时，前端直接更新对应 block 的 `type`、`role`、`level` 字段。
+3. 点击保存后，继续通过 `PUT /api/tasks/{task_id}/edited-document` 写入人工稿。
+4. 结果页预览和导出流程都读取人工稿，因此不需要新增后端保存接口。
+
+导出影响：
+
+```text
+一级标题 -> Markdown # / HTML h1 / DOCX Heading 1
+二级标题 -> Markdown ## / HTML h2 / DOCX Heading 2
+三级标题 -> Markdown ### / HTML h3 / DOCX Heading 3
+正文     -> 普通段落
+引用/注释 -> 注释或引用样式
+图片说明 -> caption 样式
+```
+
+注意：标题级别会影响章节结构。导出阶段会基于当前 `pages` 重新构建 `chapters`，因此将一级标题改为二级标题后，它不再作为一级章节入口。
+
+### 文档标题与阅读稿正文解耦
+
+`document.title` 不再作为最终阅读稿正文的一部分显示或导出。它只作为文档元信息使用，例如任务名、下载文件命名、EPUB/DOCX 元数据标题等。
+
+新的边界规则：
+
+```text
+document.title = 文档元信息 / 文件名来源
+pages[].blocks 或 blocks[] = 最终阅读稿正文
+```
+
+因此：
+
+- 阅读稿编辑页不再额外显示 `document.title` 输入框。
+- 结果页最终阅读稿预览不再额外显示 `document.title`。
+- DOCX、HTML、Markdown、TXT 导出正文不再主动插入 `document.title`。
+- 如果识别出来的第一句话本身是一个 block，它会和其他 block 一样显示，可以通过“段落级别”改成正文、一级标题、二级标题等。
+- 修改正文 block 不再同步修改 `document.title`，避免正文内容和文件名/元信息互相污染。
+
+后续如果需要修改下载文件名，应单独增加“文档标题/文件名”设置，而不是混在阅读稿正文编辑里。
+
 ## 4.4 第四阶段：左右预览联动
 
 ### 目标

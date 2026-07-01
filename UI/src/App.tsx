@@ -18,7 +18,7 @@ import {
   ProgressClockIcon,
   FileTypeIcon,
 } from "./components/Icons";
- import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import PipelineFlow from "./components/PipelineFlow";
 // FluidBackground removed — using CSS-only background
@@ -130,13 +130,6 @@ type AuthUser = {
   role: string;
 };
 
-type PreviewState = {
-  exportId: number | null;
-  title: string;
-  content: string;
-  status: "idle" | "loading" | "ready" | "unavailable";
-};
-
 type BBox = {
   x1?: number;
   y1?: number;
@@ -174,6 +167,7 @@ type CleanBlock = {
   block_id?: string;
   type?: string;
   role?: string;
+  level?: number;
   text?: string;
   page_no?: number;
   is_graphical?: boolean;
@@ -184,6 +178,7 @@ type CleanBlock = {
   source_pages?: number[];
   source_block_ids?: string[];
   ocr_confidence?: number | null;
+  _block_index?: number;
 };
 
 type CleanPage = {
@@ -207,6 +202,25 @@ type EditableDocumentResponse = {
   document: CleanDocument;
   manual_edit?: Record<string, unknown> | null;
 };
+
+type ParagraphLevelValue = "paragraph" | "heading1" | "heading2" | "heading3" | "note" | "caption";
+
+type ParagraphLevelOption = {
+  value: ParagraphLevelValue;
+  label: string;
+  type: string;
+  role: string;
+  level?: number;
+};
+
+const PARAGRAPH_LEVEL_OPTIONS: ParagraphLevelOption[] = [
+  { value: "paragraph", label: "正文", type: "paragraph", role: "body" },
+  { value: "heading1", label: "一级标题", type: "heading", role: "heading", level: 1 },
+  { value: "heading2", label: "二级标题", type: "heading", role: "heading", level: 2 },
+  { value: "heading3", label: "三级标题", type: "heading", role: "heading", level: 3 },
+  { value: "note", label: "引用/注释", type: "note", role: "note" },
+  { value: "caption", label: "图片说明", type: "caption", role: "caption" },
+];
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -340,26 +354,80 @@ function mergeExplainBlocks(layout: ExplainPageData | null, ocr: ExplainPageData
 
 function cleanBlocksFromDocument(document: CleanDocument | null): CleanBlock[] {
   if (!document) return [];
-  if (Array.isArray(document.blocks)) return document.blocks;
+  if (Array.isArray(document.blocks)) {
+    return document.blocks.map((block, index) => ({ ...block, _block_index: index }));
+  }
   return (document.pages ?? []).flatMap((page) =>
-    (page.blocks ?? []).map((block) => ({
+    (page.blocks ?? []).map((block, index) => ({
       ...block,
-      page_no: block.page_no ?? page.page_no
+      page_no: block.page_no ?? page.page_no,
+      _block_index: index,
     }))
   );
 }
 
+function cleanBlockHasMedia(block: CleanBlock): boolean {
+  return Boolean(block.is_graphical || ["figure", "image", "table", "formula"].includes(String(block.role ?? block.type ?? "")));
+}
+
+function cleanBlockMediaUrl(taskId: string, block: CleanBlock): string | null {
+  if (!block.media_path) return null;
+  const filename = block.media_path.split("/").filter(Boolean).pop();
+  if (!filename) return null;
+  return `${API_BASE}/api/tasks/${taskId}/media/${encodeURIComponent(filename)}`;
+}
+
+function paragraphLevelForBlock(block: CleanBlock): ParagraphLevelValue {
+  const type = String(block.type ?? "").toLowerCase();
+  const role = String(block.role ?? "").toLowerCase();
+  if (type === "heading" || role === "title" || role === "heading") {
+    const level = Number(block.level ?? (role === "title" ? 1 : 2));
+    if (level <= 1) return "heading1";
+    if (level === 2) return "heading2";
+    return "heading3";
+  }
+  if (type === "caption" || role === "caption") return "caption";
+  if (type === "note" || role === "note" || type === "sidebar" || role === "sidebar") return "note";
+  return "paragraph";
+}
+
+function paragraphOption(value: ParagraphLevelValue): ParagraphLevelOption {
+  return PARAGRAPH_LEVEL_OPTIONS.find((option) => option.value === value) ?? PARAGRAPH_LEVEL_OPTIONS[0];
+}
+
+function editBlockClassName(block: CleanBlock): string {
+  const level = paragraphLevelForBlock(block);
+  if (level.startsWith("heading")) return level;
+  if (level === "note") return "note";
+  if (level === "caption") return "caption";
+  if (block.type === "formula" || block.role === "formula") return "formula";
+  return "";
+}
+
+function readingBlockClassName(block: CleanBlock): string {
+  const level = paragraphLevelForBlock(block);
+  if (level.startsWith("heading")) return "clean-heading";
+  if (level === "note") return "clean-note";
+  if (level === "caption") return "media-caption";
+  if (block.type === "formula" || block.role === "formula") return "clean-formula";
+  return "";
+}
+
+function readingBlockTag(block: CleanBlock): "p" | "h1" | "h2" | "h3" {
+  const level = paragraphLevelForBlock(block);
+  if (level === "heading1") return "h1";
+  if (level === "heading2") return "h2";
+  if (level === "heading3") return "h3";
+  return "p";
+}
+
 function cleanBlockKey(block: CleanBlock, index: number): string {
   const sourceKey = Array.isArray(block.source_block_ids) ? block.source_block_ids.join("|") : "";
-  return String(block.id || block.block_id || sourceKey || `${block.page_no ?? "p"}-${index}`);
+  return String(block.id || block.block_id || sourceKey || `${block.page_no ?? "p"}-${block._block_index ?? index}`);
 }
 
 function cloneCleanDocument(document: CleanDocument): CleanDocument {
   return JSON.parse(JSON.stringify(document)) as CleanDocument;
-}
-
-function updateCleanDocumentTitle(document: CleanDocument, title: string): CleanDocument {
-  return { ...cloneCleanDocument(document), title };
 }
 
 function updateCleanDocumentBlockText(document: CleanDocument, targetKey: string, text: string): CleanDocument {
@@ -375,15 +443,69 @@ function updateCleanDocumentBlockText(document: CleanDocument, targetKey: string
   return next;
 }
 
-function fitTextareaToContent(element: HTMLTextAreaElement | null) {
-  if (!element) return;
-  element.style.height = "auto";
-  element.style.height = `${element.scrollHeight}px`;
+function applyParagraphLevel(block: CleanBlock, value: ParagraphLevelValue): CleanBlock {
+  const option = paragraphOption(value);
+  const next: CleanBlock = {
+    ...block,
+    type: option.type,
+    role: option.role,
+  };
+  if (option.level) {
+    next.level = option.level;
+  } else {
+    delete next.level;
+  }
+  return next;
 }
 
-function firstTextPreviewExport(exports: ExportRecord[]): ExportRecord | undefined {
-  const priority = ["markdown", "md", "txt", "html"];
-  return exports.find((item) => priority.includes(item.format.toLowerCase())) ?? exports[0];
+function updateCleanDocumentBlockLevel(document: CleanDocument, targetKey: string, value: ParagraphLevelValue): CleanDocument {
+  const next = cloneCleanDocument(document);
+  if (Array.isArray(next.blocks)) {
+    next.blocks = next.blocks.map((block, index) => (cleanBlockKey(block, index) === targetKey ? applyParagraphLevel(block, value) : block));
+    return next;
+  }
+  next.pages = (next.pages ?? []).map((page) => ({
+    ...page,
+    blocks: (page.blocks ?? []).map((block, index) => (
+      cleanBlockKey({ ...block, page_no: block.page_no ?? page.page_no }, index) === targetKey ? applyParagraphLevel(block, value) : block
+    ))
+  }));
+  return next;
+}
+
+function fitTextareaToContent(element: HTMLTextAreaElement | null) {
+  if (!element) return;
+  requestAnimationFrame(() => {
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  });
+}
+
+function AutoSizeTextarea({ value, className, placeholder, onChange }: {
+  value: string;
+  className?: string;
+  placeholder?: string;
+  onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      className={className}
+      value={value}
+      rows={1}
+      placeholder={placeholder}
+      onChange={onChange}
+    />
+  );
 }
 
 function stageStatus(stage: string, task: Task, step?: TaskStep): "done" | "active" | "failed" | "wait" {
@@ -402,7 +524,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [formats, setFormats] = useState<string[]>(["epub", "markdown", "docx"]);
+  const [formats, setFormats] = useState<string[]>(["epub", "docx", "markdown", "html"]);
   const processingMode: ProcessingMode = "auto";
  const autoStart = true;
  const [aiOpen, setAiOpen] = useState(false);
@@ -731,7 +853,7 @@ export default function App() {
            setSelectedTaskId(null);
            setBundle(null);
          }}
-         onRetry={() => loadTaskBundle(currentTask.task_id)}
+         onBackToEdit={() => { setSelectedTaskId(currentTask.task_id); setShowFinish(false); }}
        />
       </motion.div>
       )}
@@ -936,7 +1058,7 @@ function LandingPage({ onStart }: { onStart: () => void }) {
             Mag2Read 智能识别版面结构，精准还原标题、正文、图片与表格，直接导出 EPUB、DOCX、Markdown、HTML —— 随处可读，随时可改。
           </p>
           <button className="landing-cta" type="button" onClick={onStart}>
-            上传文档试一试
+            马上开始
           </button>
         </div>
         <div className="landing-visual" aria-hidden="true">
@@ -1387,31 +1509,21 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
   }, [hasUnsavedChanges]);
 
   const cleanBlocks = cleanBlocksFromDocument(cleanDocument).filter((block) => {
-    if (blockHasMedia(block)) return showMedia || isEditing;
+    if (cleanBlockHasMedia(block)) return showMedia || isEditing;
     return Boolean(block.text?.trim());
   });
   const previewBlocks = isEditing ? cleanBlocks : cleanBlocks.slice(0, 40);
 
-  function blockHasMedia(block: CleanBlock): boolean {
-    return Boolean(block.is_graphical || ["figure", "image", "table", "formula"].includes(String(block.role ?? block.type ?? "")));
-  }
-
-  function mediaUrl(block: CleanBlock): string | null {
-    if (!block.media_path) return null;
-    const filename = block.media_path.split("/").filter(Boolean).pop();
-    if (!filename) return null;
-    return `${API_BASE}/api/tasks/${bundle.task.task_id}/media/${encodeURIComponent(filename)}`;
-  }
-
-  function updateTitle(title: string) {
-    setCleanDocument((document) => (document ? updateCleanDocumentTitle(document, title) : document));
+  function updateBlockText(block: CleanBlock, index: number, text: string) {
+    const key = cleanBlockKey(block, index);
+    setCleanDocument((document) => (document ? updateCleanDocumentBlockText(document, key, text) : document));
     setHasUnsavedChanges(true);
     setEditError(null);
   }
 
-  function updateBlockText(block: CleanBlock, index: number, text: string) {
+  function updateBlockLevel(block: CleanBlock, index: number, value: ParagraphLevelValue) {
     const key = cleanBlockKey(block, index);
-    setCleanDocument((document) => (document ? updateCleanDocumentBlockText(document, key, text) : document));
+    setCleanDocument((document) => (document ? updateCleanDocumentBlockLevel(document, key, value) : document));
     setHasUnsavedChanges(true);
     setEditError(null);
   }
@@ -1526,26 +1638,12 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
       <article className="reading-page">
         {editError && <div className="edit-error">{editError}</div>}
         {hasUnsavedChanges && <div className="edit-unsaved">有未保存修改</div>}
-        {isEditing ? (
-          <textarea
-            className="edit-title-input"
-            value={cleanDocument?.title || bundle.task.original_name.replace(/\.[^.]+$/, "")}
-            rows={1}
-            ref={fitTextareaToContent}
-            onChange={(event) => {
-              fitTextareaToContent(event.currentTarget);
-              updateTitle(event.target.value);
-            }}
-          />
-        ) : (
-          <h3>{cleanDocument?.title || bundle.task.original_name.replace(/\.[^.]+$/, "")}</h3>
-        )}
         {cleanStatus !== "ready" && <WaitingReadingPreview task={bundle.task} />}
         {cleanStatus === "ready" && previewBlocks.length === 0 && <p>清洗文档已生成，但正文块为空，请查看 OCR 或清洗报告。</p>}
         {cleanStatus === "ready" &&
           previewBlocks.map((block, index) => {
-            if (blockHasMedia(block) && showMedia) {
-              const src = mediaUrl(block);
+            if (cleanBlockHasMedia(block) && showMedia) {
+              const src = cleanBlockMediaUrl(bundle.task.task_id, block);
               return (
                 <div className="media-block" key={`media-${index}`}>
                   {src ? (
@@ -1560,14 +1658,11 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
                     <div className="media-missing">媒体素材未生成</div>
                   )}
                   {isEditing ? (
-                    <textarea
+                    <AutoSizeTextarea
                       className="edit-block-input media-caption-input"
                       value={block.text ?? ""}
-                      rows={1}
-                      ref={fitTextareaToContent}
                       placeholder="补充图片、表格或公式说明"
                       onChange={(event) => {
-                        fitTextareaToContent(event.currentTarget);
                         updateBlockText(block, index, event.target.value);
                       }}
                     />
@@ -1588,23 +1683,34 @@ function TextPane({ bundle, onOpenAi }: { bundle: TaskBundle; onOpenAi: () => vo
             }
             if (isEditing) {
               return (
-                <textarea
-                  className={`edit-block-input ${block.type === "heading" || block.role === "title" ? "heading" : block.type === "formula" || block.role === "formula" ? "formula" : ""}`}
-                  key={`${block.page_no ?? "p"}-${index}`}
-                  value={block.text ?? ""}
-                  rows={1}
-                  ref={fitTextareaToContent}
-                  onChange={(event) => {
-                    fitTextareaToContent(event.currentTarget);
-                    updateBlockText(block, index, event.target.value);
-                  }}
-                />
+                <div className="edit-block-wrap" key={`${block.page_no ?? "p"}-${index}`}>
+                  <label className="paragraph-level-control">
+                    <span>段落级别</span>
+                    <select
+                      value={paragraphLevelForBlock(block)}
+                      onChange={(event) => updateBlockLevel(block, index, event.target.value as ParagraphLevelValue)}
+                    >
+                      {PARAGRAPH_LEVEL_OPTIONS.map((option) => (
+                        <option value={option.value} key={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <AutoSizeTextarea
+                    className={`edit-block-input ${editBlockClassName(block)}`}
+                    value={block.text ?? ""}
+                    onChange={(event) => {
+                      updateBlockText(block, index, event.target.value);
+                    }}
+                  />
+                </div>
               );
             }
             return (
-              <p className={block.type === "heading" || block.role === "title" ? "clean-heading" : block.type === "formula" || block.role === "formula" ? "clean-formula" : ""} key={`${block.page_no ?? "p"}-${index}`}>
-                {block.text}
-              </p>
+              createElement(
+                readingBlockTag(block),
+                { className: readingBlockClassName(block), key: `${block.page_no ?? "p"}-${index}` },
+                block.text
+              )
             );
           })}
       </article>
@@ -1629,6 +1735,105 @@ function WaitingReadingPreview({ task }: { task: Task }) {
         <span />
       </div>
     </div>
+  );
+}
+
+function FinalDocumentPreview({
+  bundle,
+  includeMedia,
+  onIncludeMediaChange,
+}: {
+  bundle: TaskBundle;
+  includeMedia: boolean;
+  onIncludeMediaChange: (value: boolean) => void;
+}) {
+  const [document, setDocument] = useState<CleanDocument | null>(null);
+  const [source, setSource] = useState<"clean" | "edited">("clean");
+  const [status, setStatus] = useState<"loading" | "ready" | "waiting">("loading");
+
+  useEffect(() => {
+    setStatus("loading");
+    requestJson<EditableDocumentResponse>(`/api/tasks/${bundle.task.task_id}/edited-document`)
+      .then((response) => {
+        setDocument(response.document);
+        setSource(response.source);
+        setStatus("ready");
+      })
+      .catch(() => {
+        setDocument(null);
+        setSource("clean");
+        setStatus("waiting");
+      });
+  }, [bundle.task.task_id, bundle.task.progress]);
+
+  const blocks = cleanBlocksFromDocument(document).filter((block) => {
+    if (cleanBlockHasMedia(block)) return includeMedia;
+    return Boolean(block.text?.trim());
+  });
+
+  return (
+    <section className="content-card final-preview-card">
+      <div className="final-preview-header">
+        <div>
+          <h2>最终阅读稿预览</h2>
+          <p>这里展示当前保存的阅读稿，下载文件会基于这份内容重新生成。</p>
+        </div>
+        <div className="final-preview-tools">
+          <label className="media-toggle" title="控制预览和导出是否包含图片、表格、公式">
+            <input
+              type="checkbox"
+              checked={includeMedia}
+              onChange={(event) => onIncludeMediaChange(event.target.checked)}
+            />
+            <span className="media-toggle-track">
+              <span className="media-toggle-thumb" />
+            </span>
+            <span className="media-toggle-label">包含图片</span>
+          </label>
+          <span className="live-dot">{status === "ready" ? (source === "edited" ? "人工稿" : "系统稿") : "读取中"}</span>
+        </div>
+      </div>
+      <article className="reading-page final-reading-page">
+        {status !== "ready" && <WaitingReadingPreview task={bundle.task} />}
+        {status === "ready" && (
+          <>
+            {blocks.length === 0 && <p>阅读稿已生成，但正文块为空。</p>}
+            {blocks.map((block, index) => {
+              if (cleanBlockHasMedia(block)) {
+                const src = cleanBlockMediaUrl(bundle.task.task_id, block);
+                return (
+                  <div className="media-block" key={`final-media-${cleanBlockKey(block, index)}`}>
+                    {src ? (
+                      <div className="media-block-image">
+                        <img
+                          src={src}
+                          alt={block.text || (block.role === "table" ? "表格" : "图片")}
+                          loading="lazy"
+                        />
+                      </div>
+                    ) : (
+                      <div className="media-missing">媒体素材未生成</div>
+                    )}
+                    {block.text && (
+                      <p className={block.type === "caption" || block.role === "caption" ? "media-caption" : ""}>
+                        {block.text}
+                      </p>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                createElement(
+                  readingBlockTag(block),
+                  { className: readingBlockClassName(block), key: `final-text-${cleanBlockKey(block, index)}` },
+                  block.text
+                )
+              );
+            })}
+          </>
+        )}
+      </article>
+    </section>
   );
 }
 
@@ -1661,46 +1866,53 @@ function AiPanel({ bundle, onClose }: { bundle: TaskBundle; onClose: () => void 
   );
 }
 
-function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: () => void; onRetry: () => void }) {
-  const [preview, setPreview] = useState<PreviewState>({
-    exportId: null,
-    title: "内容预览",
-    content: "",
-    status: "idle"
-  });
+function FinishPanel({ bundle, onBack, onBackToEdit }: { bundle: TaskBundle; onBack: () => void; onBackToEdit: () => void }) {
+  const [regenerating, setRegenerating] = useState(false);
+  const [downloadingFormat, setDownloadingFormat] = useState<string | null>(null);
+  const [includeMedia, setIncludeMedia] = useState(true);
+  const exportVariant = includeMedia ? "with-media" : "text-only";
 
-  function loadPreview(exportId: number, format: string) {
-    if (exportId === preview.exportId) return;
-
-    const title = `${format.toUpperCase()} 内容预览`;
-    setPreview({ exportId, title, content: "", status: "loading" });
-
-    fetch(`${API_BASE}/api/exports/${exportId}/preview`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.text();
-      })
-      .then((text) => {
-        setPreview((prev) =>
-          prev.exportId === exportId
-            ? { ...prev, content: text, status: "ready" }
-            : prev
-        );
-      })
-      .catch(() => {
-        setPreview((prev) =>
-          prev.exportId === exportId
-            ? { ...prev, status: "unavailable" }
-            : prev
-        );
+  async function regenerateExports() {
+    if (regenerating) return;
+    setRegenerating(true);
+    try {
+      await requestJson<ExportRecord[]>(`/api/tasks/${bundle.task.task_id}/exports/regenerate?include_media=${includeMedia ? "true" : "false"}`, {
+        method: "POST",
+        body: JSON.stringify({}),
       });
+      onBackToEdit();
+    } catch {
+      window.alert("导出失败，请稍后重试。");
+    } finally {
+      setRegenerating(false);
+    }
   }
 
-  useEffect(() => {
-    if (preview.exportId !== null) return;
-    const target = firstTextPreviewExport(bundle.exports);
-    if (target) loadPreview(target.id, target.format);
-  }, [bundle.exports]);
+  async function generateAndDownload(format: string, mode: "package" | "single" = "package") {
+    const downloadKey = `${format}:${mode}:${exportVariant}`;
+    if (downloadingFormat) return;
+    setDownloadingFormat(downloadKey);
+    try {
+      const records = await requestJson<ExportRecord[]>(
+        `/api/tasks/${bundle.task.task_id}/exports/regenerate?format=${encodeURIComponent(format)}&include_media=${includeMedia ? "true" : "false"}`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        }
+      );
+      const latest = [...records].reverse().find((record) =>
+        record.format.toLowerCase() === format && Boolean(record.file_path?.includes(exportVariant))
+      ) ?? [...records].reverse().find((record) => record.format.toLowerCase() === format);
+      if (!latest) throw new Error("导出文件未生成");
+      onBackToEdit();
+      const modeQuery = ["markdown", "html"].includes(format) && mode === "single" ? "?mode=single" : "";
+      window.open(`${API_BASE}/api/exports/${latest.id}/download${modeQuery}`, "_blank", "noopener,noreferrer");
+    } catch {
+      window.alert("下载前生成最新文件失败，请稍后重试。");
+    } finally {
+      setDownloadingFormat(null);
+    }
+  }
 
   return (
     <section className="finish-screen">
@@ -1722,7 +1934,13 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
       <section className="export-section">
         <div className="export-header">
           <h2>导出文件</h2>
-          <span className="export-count">{bundle.exports.length} 个文件</span>
+          <span className="export-count">{includeMedia ? "包含图片" : "仅文字"} · {
+  new Set(
+    [...bundle.exports]
+      .filter(e => e.file_path?.includes(exportVariant))
+      .map(e => e.format)
+  ).size || bundle.exports.length
+} 个文件</span>
         </div>
         <div className="export-grid">
           {(() => {
@@ -1733,46 +1951,51 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
               { key: 'html', label: 'HTML', icon: FileCode2, previewable: true },
             ];
             return allFormats.map((fmt) => {
-              const match = bundle.exports.find(
-                (e) => e.format.toLowerCase() === fmt.key
+              const match = [...bundle.exports].reverse().find((e) =>
+                e.format.toLowerCase() === fmt.key && Boolean(e.file_path?.includes(exportVariant))
               );
-              const isActive = match && preview.exportId === match.id;
-
-              if (!match) {
-                return (
-                  <div className="export-card disabled" key={fmt.key}>
-                    <div className="export-card-icon">
-                      <fmt.icon size={20} />
-                    </div>
-                    <span className="export-card-label">{fmt.label}</span>
-                    <span className="export-card-size">未生成</span>
-                    <span className="export-card-action disabled">
-                      <DownloadIcon size={14} />
-                    </span>
-                  </div>
-                );
-              }
+              const packageDownloadKey = `${fmt.key}:package:${exportVariant}`;
+              const singleDownloadKey = `${fmt.key}:single:${exportVariant}`;
+              const isPackageDownloading = downloadingFormat === packageDownloadKey;
+              const isSingleDownloading = downloadingFormat === singleDownloadKey;
+              const canDownloadSingleFile = ["markdown", "html"].includes(fmt.key);
 
               return (
                 <div
-                  className={'export-card' + (isActive ? ' active' : '')}
-                  key={match.id}
-                  onClick={() => loadPreview(match.id, match.format)}
+                  className="export-card"
+                  key={fmt.key}
                 >
                   <div className="export-card-icon">
                     <fmt.icon size={20} />
                   </div>
                   <span className="export-card-label">{fmt.label}</span>
-                  <span className="export-card-size">{formatSize(match.file_size)}</span>
-                  <a
+                  <span className="export-card-size">{isPackageDownloading || isSingleDownloading ? "正在生成最新文件" : match ? formatSize(match.file_size) : "点击生成"}</span>
+                  <button
                     className="export-card-action"
-                    href={API_BASE + '/api/exports/' + match.id + '/download'}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => e.stopPropagation()}
+                    type="button"
+                    disabled={downloadingFormat !== null || regenerating}
+                    title={canDownloadSingleFile ? "下载资源包" : "基于当前阅读稿生成并下载"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      generateAndDownload(fmt.key, "package");
+                    }}
                   >
-                    <DownloadIcon size={14} />
-                  </a>
+                    {isPackageDownloading ? <RefreshCw size={14} /> : <DownloadIcon size={14} />}
+                  </button>
+                  {canDownloadSingleFile && (
+                    <button
+                      className="export-card-single-action"
+                      type="button"
+                      disabled={downloadingFormat !== null || regenerating}
+                      title="单文件下载，图片会以内嵌 base64 保存"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        generateAndDownload(fmt.key, "single");
+                      }}
+                    >
+                      {isSingleDownloading ? "生成中" : "单文件"}
+                    </button>
+                  )}
                 </div>
               );
             });
@@ -1780,21 +2003,19 @@ function FinishPanel({ bundle, onBack, onRetry }: { bundle: TaskBundle; onBack: 
         </div>
       </section>
 
-      <section className="content-card">
-        <h2>{preview.title}</h2>
-        {preview.status === "loading" && <p className="content-placeholder">正在读取导出内容...</p>}
-        {preview.status === "unavailable" && <p className="content-placeholder">当前导出格式暂不支持文本预览，请直接下载查看。</p>}
-        {preview.status === "ready" && <pre>{preview.content || "导出文件为空"}</pre>}
-        {preview.status === "idle" && <p className="content-placeholder">暂无可预览的导出文件。</p>}
-      </section>
+      <FinalDocumentPreview bundle={bundle} includeMedia={includeMedia} onIncludeMediaChange={setIncludeMedia} />
 
       <div className="finish-actions">
         <button className="secondary-button" onClick={onBack}>
           返回首页
         </button>
-        <button className="primary-button" onClick={onRetry}>
+        <button className="primary-button" onClick={regenerateExports} disabled={regenerating} title="修改左侧阅读稿后，点击这里基于最新内容重新生成所有格式">
           <RefreshCw size={17} />
-          刷新结果
+          {regenerating ? "正在生成" : "基于阅读稿重新生成"}
+        </button>
+        <button className="secondary-button" onClick={onBackToEdit}>
+          <Pencil size={17} />
+          编辑阅读稿
         </button>
       </div>
     </section>
